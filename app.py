@@ -38,8 +38,10 @@ from flask import Flask, jsonify, render_template, request
 
 from pipeline import (
     BadImageError,
+    HeelClipped,
     NoFootFound,
     ScanError,
+    ToesClipped,
     process_scan,
 )
 from cad import FootDrawing
@@ -49,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.0.0"
+VERSION = "3.1.0"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -222,6 +224,10 @@ def api_scan():
         return _err(str(e) or "Invalid image.", "BAD_IMAGE", 400)
     except NoFootFound as e:
         return _err(str(e), "NO_FOOT", 400)
+    except HeelClipped as e:
+        return _err(str(e), "HEEL_CLIPPED", 400)
+    except ToesClipped as e:
+        return _err(str(e), "TOES_CLIPPED", 400)
     except ScanError as e:
         return _err(str(e) or "Scan failed.", "SCAN_FAILED", 400)
     except Exception:  # never leak internals
