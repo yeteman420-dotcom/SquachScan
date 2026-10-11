@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.2.2"
+VERSION = "3.3.0"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -194,19 +194,36 @@ def view_3d():
 
 @app.get("/api/3d-model")
 def get_3d_model():
-    # Serve the demo 3D foot model (Yetey's scan)
-    # In production, this will serve the user's own reconstruction
+    # Serve a 3D foot model scaled to the user's foot length.
+    # ?length_mm=230.9 scales the parametric model. Defaults to demo.
     from flask import send_file
-    import os
+    import os, io
+    length_mm = request.args.get("length_mm", type=float)
     model_path = os.path.join(os.path.dirname(__file__), "static", "demo-foot.obj")
-    if os.path.exists(model_path):
-        return send_file(
-            model_path,
-            mimetype="model/obj",
-            as_attachment=True,
-            download_name="foot-3d.obj"
-        )
-    return {"error": "3D model not available yet"}, 404
+    if not os.path.exists(model_path):
+        return {"error": "3D model not available yet"}, 404
+    if not length_mm or length_mm <= 0:
+        return send_file(model_path, mimetype="model/obj",
+                         as_attachment=True, download_name="foot-3d.obj")
+    # Scale the parametric STL (clean, watertight) to the user's length
+    try:
+        import trimesh
+        stl_path = os.path.join(os.path.dirname(__file__), "static", "parametric-foot.stl")
+        if not os.path.exists(stl_path):
+            return send_file(model_path, mimetype="model/obj",
+                             as_attachment=True, download_name="foot-3d.obj")
+        mesh = trimesh.load(stl_path, force='mesh')
+        # Parametric model is 230.9mm long on X; scale uniformly
+        base_len = 230.9
+        mesh.vertices *= (length_mm / base_len)
+        buf = io.BytesIO()
+        mesh.export(buf, file_type='stl')
+        buf.seek(0)
+        return send_file(buf, mimetype="model/stl",
+                         as_attachment=True, download_name="foot-3d.stl")
+    except Exception as e:
+        return send_file(model_path, mimetype="model/obj",
+                         as_attachment=True, download_name="foot-3d.obj")
 
 
 @app.get("/privacy")
