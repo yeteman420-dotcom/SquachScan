@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -216,11 +216,18 @@ def get_3d_model():
         # Parametric model is 230.9mm long on X; scale uniformly
         base_len = 230.9
         mesh.vertices *= (length_mm / base_len)
+        fmt = request.args.get("format", "obj")
         buf = io.BytesIO()
-        mesh.export(buf, file_type='stl')
-        buf.seek(0)
-        return send_file(buf, mimetype="model/stl",
-                         as_attachment=True, download_name="foot-3d.stl")
+        if fmt == "stl":
+            mesh.export(buf, file_type='stl')
+            buf.seek(0)
+            return send_file(buf, mimetype="model/stl",
+                             as_attachment=True, download_name=f"foot-3d-{length_mm:.0f}mm.stl")
+        else:
+            mesh.export(buf, file_type='obj')
+            buf.seek(0)
+            return send_file(buf, mimetype="model/obj",
+                             as_attachment=True, download_name=f"foot-3d-{length_mm:.0f}mm.obj")
     except Exception as e:
         return send_file(model_path, mimetype="model/obj",
                          as_attachment=True, download_name="foot-3d.obj")
