@@ -58,6 +58,19 @@
     backdrop.classList.add("open");
   });
 
+  // Direct 3D: skip the photo, enter length manually
+  var btn3d = $("btn-3d-direct");
+  if (btn3d) {
+    btn3d.addEventListener("click", function () {
+      var v = parseFloat($("manual-length").value);
+      if (!v || v < 150 || v > 350) {
+        alert("Enter your foot length in mm (150-350). US 9 ≈ 270mm.");
+        return;
+      }
+      window.location.href = "/3d?length_mm=" + v;
+    });
+  }
+
   checkbox.addEventListener("change", function () {
     btnConsent.disabled = !checkbox.checked;
   });
