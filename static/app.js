@@ -415,6 +415,16 @@
       note.textContent = "Unscaled — no reference object. Shape only; measurements are not available. These drawings are estimates — always verify with physical measurement.";
     }
 
+    // --- 3D model link (if foot length was measured) ---
+    var row3d = $("row-3d");
+    var btn3d = $("btn-view-3d");
+    if (m.length_mm !== null && m.length_mm !== undefined && m.length_mm !== "" && m.length_mm > 0) {
+      btn3d.href = "/3d?length_mm=" + encodeURIComponent(m.length_mm);
+      row3d.hidden = false;
+    } else {
+      row3d.hidden = true;
+    }
+
     // --- downloads ---
     var base = "modtoes-scan-" + scanDate() + "-" + (state.footSide || "foot");
     $("btn-dl-svg").onclick = function () {
