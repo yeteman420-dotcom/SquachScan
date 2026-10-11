@@ -79,16 +79,14 @@ MODEL_URL = ("https://github.com/danielgatis/rembg/releases/download/"
 MODEL_SHA256 = "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8"
 MODEL_SIZE = 4574861                # bytes, expected
 
-SEG_INPUT = 320                     # u2netp native input edge (square)
+SEG_INPUT = 320                     # u2netp native input edge (square).
+                                  # NOTE: the exported model has FIXED 320x320
+                                  # input dims; do not change without
+                                  # re-exporting the ONNX graph.
 SEG_MASK_THRESHOLD = 0.5
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-
-_session = None
-_session_lock = threading.Lock()
-_session_input_name = None
-_session_output_name = None
 
 
 def _sha256_file(path: str) -> str:
@@ -138,54 +136,44 @@ def ensure_model() -> bool:
 
 
 def _get_session():
-    """Lazily load the ONNX session (once per process/worker).
+    """Create a fresh ONNX session (NOT cached).
 
-    Lazy so a missing/corrupt weights file cannot crash app startup, and
-    so each gunicorn worker builds its own session AFTER fork (ONNX
-    Runtime sessions must not cross a fork). Session.run() is thread-safe.
+    We deliberately do NOT cache the session globally: u2netp inference
+    peaks at ~345MB RSS, and caching it in every gunicorn worker risks OOM
+    on small instances. Creating the session per scan costs ~1s but keeps
+    steady-state memory lean. Callers must `del` the session and `gc.collect()`
+    after inference.
     """
-    global _session, _session_input_name, _session_output_name
-    if _session is None:
-        with _session_lock:
-            if _session is None:
-                # Runtime safety net: fetch weights if the build step did not
-                # (e.g. manually-configured hosts). Verified by SHA-256.
-                if not os.path.isfile(MODEL_PATH):
-                    ensure_model()
-                if not os.path.isfile(MODEL_PATH):
-                    raise ModelMissing(
-                        "Segmentation model not found. Run "
-                        "scripts/fetch_model.py, or ensure the build step "
-                        "downloaded the weights.")
-                try:
-                    import onnxruntime as ort
-                except ImportError as e:
-                    raise ModelMissing(
-                        "onnxruntime is not installed.") from e
-                so = ort.SessionOptions()
-                # Keep thread usage modest: gunicorn runs 2 threads/worker.
-                so.intra_op_num_threads = 2
-                so.inter_op_num_threads = 1
-                so.graph_optimization_level = (
-                    ort.GraphOptimizationLevel.ORT_ENABLE_ALL)
-                try:
-                    sess = ort.InferenceSession(
-                        MODEL_PATH, sess_options=so,
-                        providers=["CPUExecutionProvider"])
-                except Exception as e:
-                    raise ModelMissing(
-                        f"Could not load segmentation model: {e}") from e
-                _session = sess
-                _session_input_name = sess.get_inputs()[0].name
-                _session_output_name = sess.get_outputs()[0].name
-    return _session
+    if not os.path.isfile(MODEL_PATH):
+        # Runtime safety net: fetch weights if the build step did not.
+        ensure_model()
+    if not os.path.isfile(MODEL_PATH):
+        raise ModelMissing(
+            "Segmentation model not found. Run "
+            "scripts/fetch_model.py, or ensure the build step "
+            "downloaded the weights.")
+    try:
+        import onnxruntime as ort
+    except ImportError as e:
+        raise ModelMissing("onnxruntime is not installed.") from e
+    so = ort.SessionOptions()
+    # Keep memory lean: no CPU arena caching, single thread.
+    so.enable_cpu_mem_arena = False
+    so.intra_op_num_threads = 1
+    so.inter_op_num_threads = 1
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    sess = ort.InferenceSession(
+        MODEL_PATH, sess_options=so, providers=["CPUExecutionProvider"])
+    inp = sess.get_inputs()[0]
+    out = sess.get_outputs()[0]
+    return sess, inp.name, out.name
 
 
 def _u2net_mask(bgr: np.ndarray) -> np.ndarray | None:
     """Run u2netp on the image; return float32 saliency map in [0,1]
     at the input image size, or None if the model is unavailable."""
     try:
-        sess = _get_session()
+        sess, in_name, out_name = _get_session()
     except ModelMissing:
         return None
     h, w = bgr.shape[:2]
@@ -196,10 +184,18 @@ def _u2net_mask(bgr: np.ndarray) -> np.ndarray | None:
     x = (x - _IMAGENET_MEAN) / _IMAGENET_STD
     x = x.transpose(2, 0, 1)[np.newaxis].astype(np.float32)
     try:
-        logits = sess.run([_session_output_name],
-                          {_session_input_name: x})[0]
+        logits = sess.run([out_name], {in_name: x})[0]
     except Exception:
         return None
+    finally:
+        # Free the session immediately: inference peaks at ~345MB RSS and
+        # we must not hold that in a long-lived worker on a small instance.
+        try:
+            del sess
+        except Exception:
+            pass
+        import gc
+        gc.collect()
     # NOTE: this u2netp export emits raw logits that are NOT sigmoid-
     # calibrated (sigmoid maps everything to ~0.5-0.7, i.e. all-foreground).
     # Follow rembg's u2net handling: min-max normalize to [0,1] instead.
