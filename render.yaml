@@ -1,16 +1,18 @@
-# Render deployment for ModToes Foot Scanner v2.
+# Render deployment for ModToes Foot Scanner v3.
 #
 # NOTE ON EPHEMERAL DISK: Render web services have an ephemeral filesystem —
-# anything written to disk (including consent_log/consent.jsonl) is lost on
-# every restart/redeploy. That is acceptable-by-design here: the consent log
-# is the only thing we persist, and users simply re-consent after a deploy.
-# Photos are NEVER written to disk regardless. Do NOT attach a persistent
-# disk for photos — there must be nowhere for them to land.
+# anything written to disk (including consent_log/consent.jsonl and the
+# downloaded model weights in models/) is lost on every restart/redeploy.
+# That is acceptable-by-design here: the consent log is the only thing we
+# persist, and users simply re-consent after a deploy. Model weights are
+# re-downloaded by the buildCommand on every deploy (adds ~1-2 minutes to
+# the first build). Photos are NEVER written to disk regardless. Do NOT
+# attach a persistent disk for photos — there must be nowhere for them to land.
 services:
   - type: web
-    name: modtoes-scanner-v2
+    name: modtoes-scanner-v3
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python scripts/fetch_model.py
     # $PORT is injected by Render.
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --threads 2 --timeout 120
     plan: starter
