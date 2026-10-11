@@ -19,10 +19,9 @@
   #dl a { display: inline-block; background: #2b6cb0; color: #fff; text-decoration: none;
           padding: 10px 22px; border-radius: 999px; font-size: 14px; font-weight: 600; }
   #status { position: fixed; top: 45%; left: 0; right: 0; text-align: center;
-            font-size: 15px; opacity: .8; pointer-events: none; z-index: 10; }
+            font-size: 15px; opacity: .8; pointer-events: none; z-index: 10; padding: 0 20px; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
 </head>
 <body>
 <div id="hud">
@@ -36,12 +35,14 @@
 <script>
 (function() {
 const statusEl = document.getElementById('status');
-const canvas = document.getElementById('c');
+function setStatus(t) { statusEl.textContent = t; }
+
 let renderer;
 try {
+  const canvas = document.getElementById('c');
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 } catch(e) {
-  statusEl.textContent = 'WebGL not available on this device.';
+  setStatus('WebGL not available on this device.');
   return;
 }
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -49,79 +50,94 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0f1e33);
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100000);
-
 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const k1 = new THREE.DirectionalLight(0xffffff, 0.9); k1.position.set(1, 2, 1.5); scene.add(k1);
 const k2 = new THREE.DirectionalLight(0x88aaff, 0.4); k2.position.set(-1.5, 0.5, -1); scene.add(k2);
 
-// Simple orbit: drag rotate, wheel/pinch zoom
 let theta = 0.7, phi = 1.1, dist = 800;
 function applyCam() {
-  camera.position.set(
-    dist * Math.sin(phi) * Math.sin(theta),
-    dist * Math.cos(phi),
-    dist * Math.sin(phi) * Math.cos(theta)
-  );
-  camera.lookAt(0, 0, 0);
+  camera.position.set(dist*Math.sin(phi)*Math.sin(theta), dist*Math.cos(phi), dist*Math.sin(phi)*Math.cos(theta));
+  camera.lookAt(0,0,0);
 }
-let pdown = false, px = 0, py = 0, pinch0 = 0;
-canvas.addEventListener('pointerdown', e => { pdown = true; px = e.clientX; py = e.clientY; canvas.setPointerCapture(e.pointerId); });
-canvas.addEventListener('pointerup', () => pdown = false);
-canvas.addEventListener('pointercancel', () => pdown = false);
+const canvas = document.getElementById('c');
+let pdown=false, px=0, py=0, pinch0=0;
+canvas.addEventListener('pointerdown', e => { pdown=true; px=e.clientX; py=e.clientY; try{canvas.setPointerCapture(e.pointerId);}catch(_){} });
+canvas.addEventListener('pointerup', ()=>pdown=false);
+canvas.addEventListener('pointercancel', ()=>pdown=false);
 canvas.addEventListener('pointermove', e => {
-  if (!pdown) return;
-  theta -= (e.clientX - px) * 0.009;
-  phi = Math.min(2.9, Math.max(0.15, phi - (e.clientY - py) * 0.007));
-  px = e.clientX; py = e.clientY;
-  applyCam();
+  if(!pdown) return;
+  theta -= (e.clientX-px)*0.009;
+  phi = Math.min(2.9, Math.max(0.15, phi-(e.clientY-py)*0.007));
+  px=e.clientX; py=e.clientY; applyCam();
 });
 canvas.addEventListener('touchmove', e => {
-  if (e.touches.length === 2) {
-    e.preventDefault();
-    const d = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
-    if (pinch0 > 0) dist = Math.min(4000, Math.max(150, dist * pinch0 / Math.max(d, 1)));
-    pinch0 = d;
-    applyCam();
+  if(e.touches.length===2){ e.preventDefault();
+    const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+    if(pinch0>0) dist=Math.min(4000,Math.max(150,dist*pinch0/Math.max(d,1)));
+    pinch0=d; applyCam();
   }
-}, {passive: false});
-canvas.addEventListener('touchend', () => pinch0 = 0);
-canvas.addEventListener('wheel', e => { dist = Math.min(4000, Math.max(150, dist * (1 + e.deltaY * 0.001))); applyCam(); }, {passive: true});
+},{passive:false});
+canvas.addEventListener('touchend', ()=>pinch0=0);
+canvas.addEventListener('wheel', e=>{ dist=Math.min(4000,Math.max(150,dist*(1+e.deltaY*0.001))); applyCam(); },{passive:true});
 
-function animate() {
-  requestAnimationFrame(animate);
-  renderer.render(scene, camera);
+function animate(){ requestAnimationFrame(animate); renderer.render(scene,camera); }
+applyCam(); animate();
+
+// Built-in minimal OBJ parser — no external loader dependency
+function parseOBJ(text){
+  const vs=[], fs=[];
+  const lines=text.split('\n');
+  for(let li=0; li<lines.length; li++){
+    const ln=lines[li];
+    if(ln.charCodeAt(0)===118 && ln.charCodeAt(1)===32){ // 'v '
+      const p=ln.trim().split(/\s+/);
+      vs.push([parseFloat(p[1]),parseFloat(p[2]),parseFloat(p[3])]);
+    } else if(ln.charCodeAt(0)===102 && (ln.charCodeAt(1)===32||ln.length===1)){ // 'f'
+      const p=ln.trim().split(/\s+/).slice(1);
+      const idx=[];
+      for(const s of p){ const vi=parseInt(s.split('/')[0],10)-1; if(vi>=0&&vi<vs.length) idx.push(vi); }
+      for(let i=1;i<idx.length-1;i++) fs.push([idx[0],idx[i],idx[i+1]]);
+    }
+  }
+  return {vs,fs};
 }
-applyCam();
-animate();
 
-statusEl.textContent = 'Loading 3D model...';
-const loader = new THREE.OBJLoader();
-loader.load('/api/3d-model',
-  function(obj) {
-    const box = new THREE.Box3().setFromObject(obj);
-    const center = box.getCenter(new THREE.Vector3());
-    obj.position.sub(center);
-    obj.traverse(function(child) {
-      if (child.isMesh) {
-        child.material = new THREE.MeshStandardMaterial({ color: 0xd9a066, roughness: 0.65, metalness: 0.08 });
-      }
-    });
-    scene.add(obj);
-    const size = box.getSize(new THREE.Vector3()).length();
-    dist = size * 1.4;
-    applyCam();
-    statusEl.style.display = 'none';
-  },
-  function(xhr) {
-    if (xhr.loaded && xhr.total) statusEl.textContent = 'Loading ' + Math.round(xhr.loaded/xhr.total*100) + '%...';
-  },
-  function(err) {
-    statusEl.textContent = 'Could not load 3D model. Try the download button below.';
+setStatus('Downloading model...');
+fetch('/api/3d-model').then(r=>{
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const total=r.headers.get('content-length');
+  return r.text().then(t=>({t,total}));
+}).then(({t})=>{
+  setStatus('Building 3D...');
+  return new Promise(res=>setTimeout(()=>res(t),30));
+}).then(text=>{
+  const {vs,fs}=parseOBJ(text);
+  if(!vs.length||!fs.length) throw new Error('parse failed: '+vs.length+'v/'+fs.length+'f');
+  const pos=new Float32Array(fs.length*9);
+  let o=0, cx=0, cy=0, cz=0;
+  for(const v of vs){ cx+=v[0]; cy+=v[1]; cz+=v[2]; }
+  cx/=vs.length; cy/=vs.length; cz/=vs.length;
+  let maxR=0;
+  for(const f of fs) for(const i of f){
+    const v=vs[i];
+    const x=v[0]-cx, y=v[1]-cy, z=v[2]-cz;
+    pos[o++]=x; pos[o++]=y; pos[o++]=z;
+    const r=Math.sqrt(x*x+y*y+z*z);
+    if(r>maxR) maxR=r;
   }
-);
-
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth/window.innerHeight;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  g.computeVertexNormals();
+  const mesh=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color:0xd9a066, roughness:0.65, metalness:0.08}));
+  scene.add(mesh);
+  dist=maxR*2.8;
+  applyCam();
+  statusEl.style.display='none';
+}).catch(err=>{
+  setStatus('Could not load 3D model ('+err.message+'). Try the download button below.');
+});
+window.addEventListener('resize', ()=>{
+  camera.aspect=window.innerWidth/window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
