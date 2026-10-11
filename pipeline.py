@@ -220,6 +220,34 @@ class NoFootFound(ScanError):
     """Segmentation could not find a plausible foot contour."""
 
 
+class HeelClipped(ScanError):
+    """Foot was found, but the heel is cut off by the frame edge."""
+
+
+class ToesClipped(ScanError):
+    """Foot was found, but the toes are cut off by the frame edge."""
+
+
+def _frame_touch_edges(contour, img_w: float, img_h: float):
+    """Return the set of frame edges the contour touches.
+
+    Edges are 'left', 'top', 'right', 'bottom'. A 2%-of-max-dim margin
+    counts as touching.
+    """
+    x, y, w, h = cv2.boundingRect(contour)
+    m = 0.02 * max(img_w, img_h)
+    edges = set()
+    if x < m:
+        edges.add("left")
+    if y < m:
+        edges.add("top")
+    if x + w > img_w - m:
+        edges.add("right")
+    if y + h > img_h - m:
+        edges.add("bottom")
+    return edges
+
+
 class ModelMissing(ScanError):
     """The segmentation model weights are not present on disk."""
 
@@ -281,12 +309,12 @@ def _decode_bgr(jpeg_bytes: bytes) -> np.ndarray:
 
 def _contour_passes_sanity(contour, img_area: float, img_w: int, img_h: int) -> bool:
     area = cv2.contourArea(contour)
-    if not (0.05 * img_area <= area <= 0.60 * img_area):
+    if not (0.04 * img_area <= area <= 0.75 * img_area):
         return False
-    # Reject anything touching the frame (that is the background, not the foot).
-    x, y, w, h = cv2.boundingRect(contour)
-    m = 0.02 * max(img_w, img_h)
-    if x < m or y < m or x + w > img_w - m or y + h > img_h - m:
+    # Real phone photos of feet often have the ankle/leg running out of
+    # frame on ONE side. Allow touching exactly one frame edge; touching
+    # two or more means the foot is badly framed (or it is background).
+    if len(_frame_touch_edges(contour, img_w, img_h)) > 1:
         return False
     (_, _), (rw, rh), _ = cv2.minAreaRect(contour)
     if min(rw, rh) < 1e-6:
@@ -342,6 +370,190 @@ def _otsu_segment(bgr: np.ndarray, img_area: float, img_w: int, img_h: int):
     return best
 
 
+def _foot_axis_profile(contour, nbins: int = 40):
+    """PCA long axis + width profile of a foot contour.
+
+    Returns (major, t, widths, tmin, tmax) where major is the unit long-axis
+    vector, t is each point's projection, and widths[b] is the cross width
+    in bin b from tmin to tmax.
+    """
+    pts = contour.reshape(-1, 2).astype(np.float64)
+    mean = pts.mean(axis=0)
+    centered = pts - mean
+    vals, vecs = np.linalg.eigh(np.cov(centered.T))
+    order = np.argsort(vals)
+    major = vecs[:, order[1]] / (np.linalg.norm(vecs[:, order[1]]) + 1e-12)
+    t = centered @ major
+    tmin, tmax = float(t.min()), float(t.max())
+    minor = np.array([-major[1], major[0]])
+    v = centered @ minor
+    widths = np.zeros(nbins)
+    for b in range(nbins):
+        lo = tmin + (tmax - tmin) * b / nbins
+        hi = tmin + (tmax - tmin) * (b + 1) / nbins
+        sel = v[(t >= lo) & (t < hi)]
+        if sel.size > 2:
+            widths[b] = float(np.percentile(sel, 99) - np.percentile(sel, 1))
+    return major, t, widths, tmin, tmax, centered
+
+
+def _orient_toes_first(widths: np.ndarray) -> bool:
+    """True if widths[0] end looks like toes (narrow tip, steep rise to ball).
+
+    Compares both orientations; the toe end has a narrow tip that widens
+    steeply into the ball within the first ~40% of length.
+    """
+    def toe_score(ww):
+        tip = float(np.mean(ww[:3]))
+        peak = float(np.max(ww[:16]))
+        return (peak - tip) / max(peak, 1e-6)
+    return toe_score(widths) >= toe_score(widths[::-1])
+
+
+def _truncate_at_ankle(contour, major, t, widths, tmin, tmax,
+                       toes_at_min: bool, nbins: int = 40):
+    """Cut the leg off a foot contour whose ankle runs out of frame.
+
+    Finds the ankle dip (width minimum after the heel peak, on the heel
+    side) and returns a new closed contour through the toes, cut straight
+    across the ankle. Returns None if no clean ankle dip is found.
+    """
+    # Work in toes->heel orientation.
+    if not toes_at_min:
+        widths = widths[::-1]
+        t = -t
+        major = -major
+        tmin, tmax = -tmax, -tmin
+    # Heel peak = max width in the posterior half; ankle dip = min after it.
+    half = nbins // 2
+    post = widths[half:]
+    if post.size < 6:
+        return None
+    peak_rel = int(np.argmax(post))
+    peak_bin = half + peak_rel
+    if peak_bin >= nbins - 3:
+        return None  # heel not complete; caller should have raised already
+    dip_rel = int(np.argmin(widths[peak_bin:]))
+    dip_bin = peak_bin + dip_rel
+    if dip_bin >= nbins - 2 or dip_bin <= peak_bin:
+        return None
+    # Sanity: the dip must be a real narrowing (heel meaningfully wider).
+    if widths[dip_bin] > 0.85 * widths[peak_bin]:
+        return None
+    t_cut = tmin + (tmax - tmin) * (dip_bin + 0.5) / nbins
+
+    pts = contour.reshape(-1, 2)
+    mean = pts.mean(axis=0)
+    # tp2 is in the same centered coords as t / t_cut.
+    tp2 = (pts - mean) @ major
+    near = np.abs(tp2 - t_cut) < (tmax - tmin) * 0.03
+    idx = np.where(near)[0]
+    if idx.size < 4:
+        return None
+    minor = np.array([-major[1], major[0]])
+    vp = (pts[idx] - mean) @ minor
+    side_a = idx[vp > np.median(vp)]
+    side_b = idx[vp <= np.median(vp)]
+    if side_a.size == 0 or side_b.size == 0:
+        return None
+    # Cut points: medians of each side cluster.
+    pa = np.median(pts[side_a], axis=0)
+    pb = np.median(pts[side_b], axis=0)
+    # Walk the contour the long way (through the toes). Find the indices
+    # closest to pa/pb, then take the segment that does NOT pass through
+    # the high-t (leg) region.
+    n = len(pts)
+    ia = int(np.argmin(np.linalg.norm(pts - pa, axis=1)))
+    ib = int(np.argmin(np.linalg.norm(pts - pb, axis=1)))
+    # Mean t of each arc; the toe arc has the smaller mean t.
+    def arc_mean_t(a, b):
+        if a <= b:
+            seg = tp2[a:b + 1]
+        else:
+            seg = np.concatenate([tp2[a:], tp2[:b + 1]])
+        return float(np.mean(seg)) if seg.size else float("inf")
+    if arc_mean_t(ia, ib) < arc_mean_t(ib, ia):
+        start, end = ia, ib
+    else:
+        start, end = ib, ia
+    if start <= end:
+        arc = pts[start:end + 1]
+    else:
+        arc = np.vstack([pts[start:], pts[:end + 1]])
+    if len(arc) < 20:
+        return None
+    # Close across the ankle with a straight cut.
+    closed = np.vstack([arc, arc[:1]])
+    return closed.reshape(-1, 1, 2).astype(np.int32)
+
+
+def _refine_framing(contour, img_w: int, img_h: int):
+    """Handle real-world framing: ankle/leg running out of one frame edge.
+
+    Returns (contour_for_pipeline, note). Raises HeelClipped / ToesClipped
+    with actionable guidance when the foot itself is cut off.
+    """
+    edges = _frame_touch_edges(contour, img_w, img_h)
+    if not edges:
+        return contour, "full-frame"
+    edge = next(iter(edges))  # sanity check guarantees at most one
+    major, t, widths, tmin, tmax, centered = _foot_axis_profile(contour)
+    nbins = len(widths)
+
+    # Which t extreme is clipped? Points near the touched edge.
+    m = 0.02 * max(img_w, img_h)
+    pts = contour.reshape(-1, 2).astype(np.float64)
+    x, y = pts[:, 0], pts[:, 1]
+    if edge == "left":
+        near = x < m
+    elif edge == "right":
+        near = x > img_w - m
+    elif edge == "top":
+        near = y < m
+    else:
+        near = y > img_h - m
+    if not np.any(near):
+        return contour, "edge-touch-unclear"
+    t_near = float(np.mean(t[near]))
+    clipped_at_max = abs(t_near - tmax) < abs(t_near - tmin)
+
+    toes_at_min = _orient_toes_first(widths)
+    clipped_is_toes = (clipped_at_max and not toes_at_min) or \
+                      (not clipped_at_max and toes_at_min)
+    if clipped_is_toes:
+        raise ToesClipped(
+            "We found your foot, but your toes are cut off at the edge of "
+            "the photo. Pull back so your whole foot \u2014 toes to heel "
+            "\u2014 is inside the frame, then retake."
+        )
+
+    # Clipped at the heel/ankle end. Work toes->heel.
+    w = widths if toes_at_min else widths[::-1]
+    heel_half = w[nbins // 2:]
+    if heel_half.size < 6:
+        raise HeelClipped(
+            "We found your foot, but your heel is cut off at the edge of "
+            "the photo. Pull back so your whole foot \u2014 toes to heel "
+            "\u2014 is fully inside the frame, then retake."
+        )
+    peak_rel = int(np.argmax(heel_half))
+    # Heel complete only if the width peaks and falls well before the edge.
+    if peak_rel >= int(len(heel_half) * 0.80):
+        raise HeelClipped(
+            "We found your foot, but your heel is cut off at the edge of "
+            "the photo. Pull back so your whole foot \u2014 toes to heel "
+            "\u2014 is fully inside the frame, then retake."
+        )
+    # Heel is complete; the ankle/leg runs out of frame. Truncate the leg
+    # so it cannot pollute the length measurement.
+    trunc = _truncate_at_ankle(contour, major, t, widths, tmin, tmax,
+                               toes_at_min, nbins)
+    if trunc is None:
+        # Could not cleanly separate ankle; measure what we have but warn.
+        return contour, "ankle-out-untruncated"
+    return trunc, "ankle-truncated"
+
+
 def segment_foot(bgr: np.ndarray):
     """Return (contour, method_note). Raises NoFootFound.
 
@@ -353,16 +565,21 @@ def segment_foot(bgr: np.ndarray):
 
     contour, note = _segment_with_model(bgr)
     if contour is not None:
-        return contour, note
+        # Real-world framing: allow the ankle/leg to run out of one frame
+        # edge; raise specific guidance if the foot itself is cut off.
+        contour, framing = _refine_framing(contour, w, h)
+        return contour, f"{note}+{framing}"
 
     # LAST-RESORT classical fallbacks (v2 behavior).
     best = _otsu_segment(bgr, img_area, w, h)
     if best is not None:
-        return best, "otsu"
+        best, framing = _refine_framing(best, w, h)
+        return best, f"otsu+{framing}"
 
     fb = _grabcut_fallback(bgr, img_area)
     if fb is not None:
-        return fb, "grabcut"
+        fb, framing = _refine_framing(fb, w, h)
+        return fb, f"grabcut+{framing}"
     raise NoFootFound(
         "No foot detected. Photograph the foot on a plain, contrasting "
         "background with the whole foot visible."
