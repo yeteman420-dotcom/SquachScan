@@ -156,15 +156,17 @@ def _security_headers(resp):
 @app.get("/healthz")
 def healthz():
     info = {"ok": True, "version": VERSION}
-    # Model self-test: verify the ONNX weights exist and run inference.
+    # Model self-test: ensure weights exist (downloading if needed) and
+    # verify inference runs.
     try:
-        from pipeline import _get_session, MODEL_PATH
+        from pipeline import _get_session, MODEL_PATH, ensure_model
         import os
+        # Trigger runtime download if the build step did not fetch weights.
+        ensure_model()
         info["model_file"] = os.path.isfile(MODEL_PATH)
         if info["model_file"]:
             import numpy as np
             sess = _get_session()
-            # Tiny synthetic input: just verify inference runs.
             x = np.zeros((1, 3, 320, 320), dtype=np.float32)
             from pipeline import _session_input_name, _session_output_name
             out = sess.run([_session_output_name],
