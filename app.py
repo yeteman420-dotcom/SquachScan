@@ -155,7 +155,27 @@ def _security_headers(resp):
 
 @app.get("/healthz")
 def healthz():
-    return jsonify({"ok": True, "version": VERSION})
+    info = {"ok": True, "version": VERSION}
+    # Model self-test: verify the ONNX weights exist and run inference.
+    try:
+        from pipeline import _get_session, MODEL_PATH
+        import os
+        info["model_file"] = os.path.isfile(MODEL_PATH)
+        if info["model_file"]:
+            import numpy as np
+            sess = _get_session()
+            # Tiny synthetic input: just verify inference runs.
+            x = np.zeros((1, 3, 320, 320), dtype=np.float32)
+            from pipeline import _session_input_name, _session_output_name
+            out = sess.run([_session_output_name],
+                           {_session_input_name: x})[0]
+            info["model_inference"] = "ok"
+            info["model_output_shape"] = list(out.shape)
+        else:
+            info["model_inference"] = "missing"
+    except Exception as e:
+        info["model_inference"] = f"error: {type(e).__name__}"
+    return jsonify(info)
 
 
 @app.get("/")
