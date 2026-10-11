@@ -1,4 +1,4 @@
-/* ModToes Foot Scanner v2 — vanilla JS, no dependencies.
+/* ModToes Foot Scanner v3 — vanilla JS, no dependencies.
    Step flow: landing -> consent modal -> setup -> capture -> processing -> results.
    Consent ID is kept in memory only (never localStorage). */
 (function () {
@@ -8,7 +8,7 @@
     consentId: null,      // memory only
     consentTs: null,
     footSide: null,       // "left" | "right"
-    reference: null,       // "quarter" | "card" | "none"
+    reference: null,      // "quarter" | "card" | "none"
     stream: null,
     photoBlob: null,      // raw capture (from camera or file)
     result: null          // last successful /api/scan payload
