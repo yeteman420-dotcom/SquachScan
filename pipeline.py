@@ -91,6 +91,51 @@ _session_input_name = None
 _session_output_name = None
 
 
+def _sha256_file(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ensure_model() -> bool:
+    """Ensure the ONNX weights exist, downloading them if necessary.
+
+    Safety net for hosts whose build step did not fetch the model (e.g. a
+    manually-configured Render service whose buildCommand lacks the fetch
+    step). Verifies size + SHA-256. Returns True if the model is ready.
+    Thread-safe via _session_lock (callers should hold it).
+    """
+    if os.path.isfile(MODEL_PATH):
+        try:
+            if os.path.getsize(MODEL_PATH) == MODEL_SIZE and \
+                    _sha256_file(MODEL_PATH) == MODEL_SHA256:
+                return True
+        except OSError:
+            pass
+    # Download (atomic via tmp file).
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    tmp = MODEL_PATH + ".dl"
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(MODEL_URL, tmp)
+        if os.path.getsize(tmp) != MODEL_SIZE or \
+                _sha256_file(tmp) != MODEL_SHA256:
+            os.remove(tmp)
+            return False
+        os.replace(tmp, MODEL_PATH)
+        return True
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def _get_session():
     """Lazily load the ONNX session (once per process/worker).
 
@@ -102,6 +147,10 @@ def _get_session():
     if _session is None:
         with _session_lock:
             if _session is None:
+                # Runtime safety net: fetch weights if the build step did not
+                # (e.g. manually-configured hosts). Verified by SHA-256.
+                if not os.path.isfile(MODEL_PATH):
+                    ensure_model()
                 if not os.path.isfile(MODEL_PATH):
                     raise ModelMissing(
                         "Segmentation model not found. Run "
