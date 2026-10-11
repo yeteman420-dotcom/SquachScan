@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Your 3D Foot — ModToes Scanner v{{ version }}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1e33; color: #fff; font-family: -apple-system, system-ui, sans-serif; overflow: hidden; }
+  #c { position: fixed; inset: 0; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; padding: 14px 16px;
+         background: linear-gradient(to bottom, rgba(10,20,40,.85), transparent);
+         pointer-events: none; }
+  #hud h1 { font-size: 18px; font-weight: 700; }
+  #hud p { font-size: 13px; opacity: .75; margin-top: 4px; }
+  #hint { position: fixed; bottom: 18px; left: 0; right: 0; text-align: center;
+          font-size: 13px; opacity: .6; pointer-events: none; }
+  #dl { position: fixed; bottom: 52px; left: 0; right: 0; text-align: center; }
+  #dl a { display: inline-block; background: #2b6cb0; color: #fff; text-decoration: none;
+          padding: 10px 22px; border-radius: 999px; font-size: 14px; font-weight: 600; }
+  #err { position: fixed; top: 40%; left: 10%; right: 10%; text-align: center; display: none;
+         background: rgba(160,20,20,.9); padding: 18px; border-radius: 12px; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<div id="hud">
+  <h1>Your 3D Foot</h1>
+  <p>ModToes Scanner v{{ version }} &bull; drag to rotate &bull; pinch to zoom</p>
+</div>
+<div id="hint">Drag to spin &bull; pinch to zoom</div>
+<div id="dl"><a href="/api/3d-model" download="foot-3d.obj">Download 3D model</a></div>
+<div id="err"></div>
+<canvas id="c"></canvas>
+<script>
+// Minimal OBJ parser (vertices + faces only)
+function parseOBJ(text) {
+  const vs = [], fs = [];
+  const lines = text.split('\n');
+  for (const ln of lines) {
+    if (ln[0] === 'v' && ln[1] === ' ') {
+      const p = ln.split(/\s+/);
+      vs.push([parseFloat(p[1]), parseFloat(p[2]), parseFloat(p[3])]);
+    } else if (ln[0] === 'f') {
+      const p = ln.split(/\s+/).slice(1);
+      const idx = p.map(s => parseInt(s.split('/')[0], 10) - 1);
+      for (let i = 1; i < idx.length - 1; i++) fs.push([idx[0], idx[i], idx[i+1]]);
+    }
+  }
+  return { vs, fs };
+}
+
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1e33);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100000);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const k1 = new THREE.DirectionalLight(0xffffff, 0.85); k1.position.set(1, 2, 1.5); scene.add(k1);
+const k2 = new THREE.DirectionalLight(0x88aaff, 0.35); k2.position.set(-1.5, 0.5, -1); scene.add(k2);
+
+// Touch orbit (no external controls lib needed)
+let theta = 0.6, phi = 1.05, dist = 600, tx = 0, ty = 0, tz = 0;
+let lastT = null, pinchD = 0;
+function applyCam() {
+  camera.position.set(
+    tx + dist * Math.sin(phi) * Math.sin(theta),
+    ty + dist * Math.cos(phi),
+    tz + dist * Math.sin(phi) * Math.cos(theta)
+  );
+  camera.lookAt(tx, ty, tz);
+}
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) lastT = [e.touches[0].clientX, e.touches[0].clientY];
+  else if (e.touches.length === 2) pinchD = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+}, {passive:true});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 1 && lastT) {
+    const dx = e.touches[0].clientX - lastT[0], dy = e.touches[0].clientY - lastT[1];
+    theta -= dx * 0.008; phi = Math.min(2.9, Math.max(0.15, phi - dy * 0.006));
+    lastT = [e.touches[0].clientX, e.touches[0].clientY];
+  } else if (e.touches.length === 2) {
+    const d = Math.hypot(e.touches[0].clientX-e.touches[1].clientX, e.touches[0].clientY-e.touches[1].clientY);
+    dist = Math.min(3000, Math.max(120, dist * pinchD / Math.max(d, 1)));
+    pinchD = d;
+  }
+  applyCam();
+}, {passive:false});
+let md = false, lx = 0, ly = 0;
+canvas.addEventListener('mousedown', e => { md = true; lx = e.clientX; ly = e.clientY; });
+window.addEventListener('mouseup', () => md = false);
+canvas.addEventListener('mousemove', e => {
+  if (!md) return;
+  theta -= (e.clientX - lx) * 0.008; phi = Math.min(2.9, Math.max(0.15, phi - (e.clientY - ly) * 0.006));
+  lx = e.clientX; ly = e.clientY; applyCam();
+});
+canvas.addEventListener('wheel', e => { dist = Math.min(3000, Math.max(120, dist * (1 + e.deltaY * 0.001))); applyCam(); }, {passive:true});
+
+fetch('/api/3d-model').then(r => {
+  if (!r.ok) throw new Error('model not ready');
+  return r.text();
+}).then(text => {
+  const { vs, fs } = parseOBJ(text);
+  const pos = new Float32Array(fs.length * 9);
+  let o = 0;
+  const cx=[0,0,0];
+  for (const v of vs) { cx[0]+=v[0]; cx[1]+=v[1]; cx[2]+=v[2]; }
+  cx[0]/=vs.length; cx[1]/=vs.length; cx[2]/=vs.length;
+  let maxR = 0;
+  for (const f of fs) for (const i of f) {
+    const v = vs[i];
+    pos[o++]=v[0]-cx[0]; pos[o++]=v[1]-cx[1]; pos[o++]=v[2]-cx[2];
+    maxR = Math.max(maxR, Math.hypot(v[0]-cx[0], v[1]-cx[1], v[2]-cx[2]));
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  const m = new THREE.MeshStandardMaterial({ color: 0xd9a066, roughness: 0.65, metalness: 0.08 });
+  scene.add(new THREE.Mesh(g, m));
+  dist = maxR * 2.6;
+  applyCam();
+  (function loop(){ requestAnimationFrame(loop); renderer.render(scene, camera); })();
+}).catch(err => {
+  const e = document.getElementById('err');
+  e.style.display = 'block';
+  e.textContent = '3D model is still being built. Check back in a minute.';
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+applyCam();
+</script>
+</body>
+</html>
