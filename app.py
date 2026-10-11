@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.1.1"
+VERSION = "3.1.2"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -161,18 +161,20 @@ def healthz():
     try:
         from pipeline import _get_session, MODEL_PATH, ensure_model
         import os
-        # Trigger runtime download if the build step did not fetch weights.
         ensure_model()
         info["model_file"] = os.path.isfile(MODEL_PATH)
         if info["model_file"]:
             import numpy as np
-            sess = _get_session()
-            x = np.zeros((1, 3, 320, 320), dtype=np.float32)
-            from pipeline import _session_input_name, _session_output_name
-            out = sess.run([_session_output_name],
-                           {_session_input_name: x})[0]
-            info["model_inference"] = "ok"
-            info["model_output_shape"] = list(out.shape)
+            sess, in_name, out_name = _get_session()
+            try:
+                x = np.zeros((1, 3, 320, 320), dtype=np.float32)
+                out = sess.run([out_name], {in_name: x})[0]
+                info["model_inference"] = "ok"
+                info["model_output_shape"] = list(out.shape)
+            finally:
+                del sess
+                import gc
+                gc.collect()
         else:
             info["model_inference"] = "missing"
     except Exception as e:
