@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.4.2"
+VERSION = "3.4.3"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -196,7 +196,7 @@ def view_3d():
 def get_3d_model():
     # Serve a 3D foot model scaled to the user's foot length.
     # ?length_mm=230.9 scales the parametric model. Defaults to demo.
-    # No heavy deps: scales binary STL directly with numpy.
+    # Procedural generation: no file deps, no heavy libs, just numpy.
     from flask import send_file
     import os, io, struct
     import numpy as np
@@ -206,67 +206,64 @@ def get_3d_model():
     if not length_mm or length_mm <= 0:
         return send_file(model_path, mimetype="model/obj",
                          as_attachment=True, download_name="foot-3d.obj")
-    stl_path = os.path.join(os.path.dirname(__file__), "static", "parametric-foot.stl")
-    if not os.path.exists(stl_path):
-        return send_file(model_path, mimetype="model/obj",
-                         as_attachment=True, download_name="foot-3d.obj")
     try:
-        # Read binary STL
-        with open(stl_path, 'rb') as f:
-            f.seek(80)
-            n_tri = struct.unpack('<I', f.read(4))[0]
-            # Each tri: normal(3f) + v1(3f) + v2(3f) + v3(3f) + attr(2B) = 50 bytes
-            data = f.read(n_tri * 50)
-        tris = np.frombuffer(data, dtype=np.uint8).reshape(n_tri, 50)
-        # Extract vertices (skip normals, scale positions)
-        # Bytes 12-48 of each 50-byte record are the 3 vertices (9 floats)
-        verts_raw = np.frombuffer(data, dtype='<f4').reshape(n_tri, -1)
-        # Layout per tri: [nx,ny,nz, v1x,v1y,v1z, v2x,v2y,v2z, v3x,v3y,v3z] + 2B attr
-        # frombuffer as f4 misaligns due to attr bytes; do it manually
-        scale = length_mm / 230.9
-        # Manual parse: iterate tris
-        v1 = np.zeros((n_tri, 3)); v2 = np.zeros((n_tri, 3)); v3 = np.zeros((n_tri, 3))
-        for i in range(n_tri):
-            off = i * 50
-            # skip normal (12B), read 3 verts (36B)
-            v1[i] = struct.unpack('<3f', data[off+12:off+24])
-            v2[i] = struct.unpack('<3f', data[off+24:off+36])
-            v3[i] = struct.unpack('<3f', data[off+36:off+48])
-        v1 *= scale; v2 *= scale; v3 *= scale
+        # Procedural parametric foot (matches the 230.9mm reference model)
+        # Stations: heel(0) to toes(1)
+        stations = np.array([0.00, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.85])
+        half_w = np.array([30, 32, 30, 28, 32, 40, 45, 44, 40, 38])
+        heights = np.array([65, 68, 60, 45, 35, 32, 35, 38, 35, 30])
+        n_st, n_ar = 32, 28
+        t = np.linspace(0, 0.85, n_st)
+        # Linear interp (avoid scipy dep)
+        def interp(x, xp, fp):
+            return np.interp(x, xp, fp)
+        verts = []
+        for ti in t:
+            x = ti * 230.9
+            w = float(interp(ti, stations, half_w))
+            h = float(interp(ti, stations, heights))
+            for j in range(n_ar):
+                ang = 2*np.pi*j/n_ar
+                e = 2.5
+                cx = np.sign(np.cos(ang)) * abs(np.cos(ang))**(2/e) * w
+                sy = np.sin(ang)
+                cz = 2 + sy*2 if sy < 0 else 2 + sy*(h-2)
+                verts.append([x, cx, max(cz, 0.5)])
+        verts = np.array(verts)
+        faces = []
+        for i in range(n_st-1):
+            for j in range(n_ar):
+                j2 = (j+1) % n_ar
+                a, b = i*n_ar+j, i*n_ar+j2
+                c, d = (i+1)*n_ar+j, (i+1)*n_ar+j2
+                faces.append([a,c,b]); faces.append([b,c,d])
+        hc = len(verts); verts = np.vstack([verts, [[0,0,35]]])
+        for j in range(n_ar):
+            faces.append([hc, (j+1)%n_ar, j])
+        # Scale to requested length
+        verts *= (length_mm / 230.9)
+        faces = np.array(faces, dtype=np.int32)
         if fmt == "stl":
             buf = io.BytesIO()
-            buf.write(b'\x00' * 80)
-            buf.write(struct.pack('<I', n_tri))
-            for i in range(n_tri):
-                buf.write(struct.pack('<3f', 0, 0, 0))  # normal
-                buf.write(struct.pack('<3f', *v1[i]))
-                buf.write(struct.pack('<3f', *v2[i]))
-                buf.write(struct.pack('<3f', *v3[i]))
+            buf.write(b'\x00'*80)
+            buf.write(struct.pack('<I', len(faces)))
+            for f in faces:
+                buf.write(struct.pack('<3f', 0,0,0))
+                for vi in f:
+                    buf.write(struct.pack('<3f', *verts[vi]))
                 buf.write(struct.pack('<H', 0))
             buf.seek(0)
             return send_file(buf, mimetype="model/stl", as_attachment=True,
-                             download_name=f"foot-3d-{length_mm:.0f}mm.stl")
+                             download_name="foot-3d-%.0fmm.stl" % length_mm)
         else:
-            # OBJ: deduplicate vertices
-            allv = np.vstack([v1, v2, v3])
-            # Simple dedup via rounding
-            _, uniq_idx = np.unique(np.round(allv, 4), axis=0, return_inverse=True)
-            # Rebuild faces with deduped indices (approximate; fine for viewer)
-            lines = ["# parametric foot, scaled to %.1fmm" % length_mm]
-            # Write unique verts
-            uverts = np.unique(np.round(allv, 4), axis=0)
-            for v in uverts:
-                lines.append("v %.4f %.4f %.4f" % tuple(v))
-            # Map each tri's verts to indices (1-based)
-            vmap = {tuple(np.round(v, 4)): i+1 for i, v in enumerate(uverts)}
-            for i in range(n_tri):
-                a = vmap[tuple(np.round(v1[i], 4))]
-                b = vmap[tuple(np.round(v2[i], 4))]
-                c = vmap[tuple(np.round(v3[i], 4))]
-                lines.append("f %d %d %d" % (a, b, c))
+            lines = ["# parametric foot %.1fmm" % length_mm]
+            for v in verts:
+                lines.append("v %.3f %.3f %.3f" % tuple(v))
+            for f in faces:
+                lines.append("f %d %d %d" % (f[0]+1, f[1]+1, f[2]+1))
             buf = io.BytesIO(("\n".join(lines)).encode())
             return send_file(buf, mimetype="model/obj", as_attachment=True,
-                             download_name=f"foot-3d-{length_mm:.0f}mm.obj")
+                             download_name="foot-3d-%.0fmm.obj" % length_mm)
     except Exception:
         return send_file(model_path, mimetype="model/obj",
                          as_attachment=True, download_name="foot-3d.obj")
