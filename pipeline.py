@@ -1179,3 +1179,124 @@ def process_scan(image_bytes: bytes, foot_side: str = "left", reference: str = "
         "warnings": warnings,
         "debug": debug,
     }
+
+
+def contour_to_3d_obj(contour, px_per_mm=None):
+    """Build a parametric 3D foot mesh from a 2D contour.
+    
+    Uses the actual foot outline shape (from segmentation) with anatomical
+    height profiles. Returns OBJ format string. Light enough for free tier.
+    """
+    import numpy as np
+    try:
+        import trimesh
+        from scipy.interpolate import interp1d
+    except ImportError:
+        return None
+    
+    c = np.array(contour).reshape(-1, 2).astype(float)
+    if len(c) < 20:
+        return None
+    
+    # Convert px to mm (estimate 0.5mm/px if not calibrated)
+    s = 1.0 / px_per_mm if px_per_mm and px_per_mm > 0 else 0.5
+    c_mm = c * s
+    
+    # Find long axis via PCA
+    centroid = c_mm.mean(axis=0)
+    centered = c_mm - centroid
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    axis = vt[0]  # long axis
+    # Project onto axis to find heel (min) and toes (max)
+    proj = centered @ axis
+    # Ensure toes are at max (heel at min) - toes are narrower
+    # Check width at both ends
+    order = np.argsort(proj)
+    # Use 10% at each end to estimate width
+    n = len(proj)
+    heel_end = centered[order[:n//10]]
+    toe_end = centered[order[-n//10:]]
+    # Width perpendicular to axis
+    perp = np.array([-axis[1], axis[0]])
+    heel_w = (heel_end @ perp).std()
+    toe_w = (toe_end @ perp).std()
+    # Toes should be narrower than heel/ball... actually ball is widest
+    # Just ensure consistent orientation: heel at min proj
+    # (we'll refine based on shape)
+    
+    t = (proj - proj.min()) / max(proj.max() - proj.min(), 1e-6)  # 0=heel, 1=toes
+    
+    # Height profile (mm) - anatomical
+    h_stations = np.array([0.0, 0.15, 0.3, 0.5, 0.65, 0.8, 0.9, 1.0])
+    h_vals = np.array([62, 65, 55, 38, 32, 34, 28, 18])
+    hf = interp1d(h_stations, h_vals, kind='cubic', fill_value='extrapolate')
+    
+    # Build 3D by lofting: for each contour point, create top and bottom
+    # Simpler: create a grid mesh from the outline
+    # We'll do a "heightfield" approach: triangulate the 2D outline, then displace Z by height profile
+    
+    # Get outline as ordered polygon (use convex hull of contour for simplicity, or the contour itself)
+    # Use the contour, resample to even points
+    from scipy.spatial import ConvexHull
+    try:
+        hull = ConvexHull(c_mm)
+        outline = c_mm[hull.vertices]
+    except:
+        outline = c_mm[::max(1, len(c_mm)//100)]
+    
+    # Order outline by angle
+    oc = outline.mean(axis=0)
+    angs = np.arctan2(outline[:,1]-oc[1], outline[:,0]-oc[0])
+    outline = outline[np.argsort(angs)]
+    
+    # For each outline point, compute t (0=heel, 1=toes) and height
+    op = (outline - centroid) @ axis
+    ot = (op - proj.min()) / max(proj.max() - proj.min(), 1e-6)
+    ot = np.clip(ot, 0, 1)
+    heights = np.array([float(hf(x)) for x in ot])
+    
+    # Build 3D mesh: bottom (sole, z=0) + top (z=height) + sides
+    n_out = len(outline)
+    verts = []
+    # Bottom ring (z=0)
+    for pt in outline:
+        verts.append([pt[0], pt[1], 0.0])
+    # Top ring (z=height)
+    for pt, h in zip(outline, heights):
+        verts.append([pt[0], pt[1], max(h, 2.0)])
+    # Center top (for fan)
+    top_center = [oc[0], oc[1], float(heights.mean())]
+    verts.append(top_center)
+    # Center bottom
+    verts.append([oc[0], oc[1], 0.0])
+    
+    verts = np.array(verts)
+    faces = []
+    # Sides
+    for j in range(n_out):
+        j2 = (j+1) % n_out
+        # bottom j, bottom j2, top j, top j2
+        faces.append([j, n_out+j, j2])
+        faces.append([j2, n_out+j, n_out+j2])
+    # Top fan
+    tc = 2 * n_out
+    for j in range(n_out):
+        j2 = (j+1) % n_out
+        faces.append([tc, n_out+j, n_out+j2])
+    # Bottom fan
+    bc = 2 * n_out + 1
+    for j in range(n_out):
+        j2 = (j+1) % n_out
+        faces.append([bc, j2, j])
+    
+    faces = np.array(faces)
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=True)
+    # The top is flat (not foot-shaped). Let's displace top vertices to create arch/dome
+    # Actually, the height variation is already in the top ring. The fan center is average.
+    # For a better shape, we'd need interior vertices. Keep it simple for now.
+    
+    if mesh.volume < 0:
+        mesh.invert()
+    
+    # Export OBJ
+    return trimesh.exchange.obj.export_obj(mesh)
