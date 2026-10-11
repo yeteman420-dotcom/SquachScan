@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.2.0"
+VERSION = "3.2.1"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -200,7 +200,12 @@ def get_3d_model():
     import os
     model_path = os.path.join(os.path.dirname(__file__), "static", "demo-foot.obj")
     if os.path.exists(model_path):
-        return send_file(model_path, mimetype="text/plain")
+        return send_file(
+            model_path,
+            mimetype="model/obj",
+            as_attachment=True,
+            download_name="foot-3d.obj"
+        )
     return {"error": "3D model not available yet"}, 404
 
 
