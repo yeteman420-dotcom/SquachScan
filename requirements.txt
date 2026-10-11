@@ -1,0 +1,6 @@
+# Pinned to match the provisioned venv (~/workspace/squachacers/scanner-v2/venv)
+flask==3.1.3
+gunicorn==26.2.0
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+pillow==12.3.0
