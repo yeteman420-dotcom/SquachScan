@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ModToes Foot Scanner — Precise CAD Foot Measurements</title>
+  <meta name="description" content="Photograph your foot and get a precise CAD technical drawing with real measurements. Your photo is deleted the second the drawing is made.">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <svg class="logo-mark" viewBox="0 0 32 32" aria-hidden="true">
+      <circle cx="16" cy="16" r="15" fill="none" stroke="#fff" stroke-width="2"/>
+      <path d="M10 20c2-4 4-6 6-6s4 2 6 6M13 11c1-1 5-1 6 0" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round"/>
+    </svg>
+    <h1>ModToes Foot Scanner</h1>
+    <span class="tag">v2</span>
+  </header>
+
+  <main>
+    <!-- ============ STEP 1: LANDING ============ -->
+    <section class="step active" id="step-landing" aria-label="Welcome">
+      <div class="card">
+        <h2>Scan your foot. Get a CAD drawing.</h2>
+        <p class="lead">Photograph your foot &rarr; get a precise CAD technical drawing with real measurements. Your photo is deleted the second the drawing is made &mdash; only the drawing survives.</p>
+        <div class="tips">
+          <h3>How it works</h3>
+          <ul>
+            <li>Place a reference (quarter or card) beside your foot</li>
+            <li>Take a top-down photo with your phone</li>
+            <li>Get foot length, ball/heel/arch widths in mm + inches</li>
+          </ul>
+        </div>
+        <button class="btn btn-primary" id="btn-start">Start scan</button>
+        <p class="small" style="text-align:center; margin-top:12px;">
+          <a href="/privacy">Privacy policy</a> &middot; <a href="/terms">Terms</a>
+        </p>
+      </div>
+    </section>
+
+    <!-- ============ STEP 2: SETUP ============ -->
+    <section class="step" id="step-setup" aria-label="Setup">
+      <div class="card">
+        <h2>Set up your scan</h2>
+
+        <div class="opt-group" role="group" aria-label="Foot side">
+          <div class="opt-label">Which foot?</div>
+          <div class="opt-row">
+            <button class="opt" data-group="foot" data-value="left" aria-pressed="false">Left</button>
+            <button class="opt" data-group="foot" data-value="right" aria-pressed="false">Right</button>
+          </div>
+        </div>
+
+        <div class="opt-group" role="group" aria-label="Reference object">
+          <div class="opt-label">Reference object</div>
+          <div class="opt-row">
+            <button class="opt" data-group="ref" data-value="quarter" aria-pressed="false">Quarter<small>&Oslash; 24.26 mm</small></button>
+            <button class="opt" data-group="ref" data-value="card" aria-pressed="false">Credit card<small>85.60 &times; 53.98 mm</small></button>
+            <button class="opt" data-group="ref" data-value="none" aria-pressed="false">None<small>shape only</small></button>
+          </div>
+        </div>
+
+        <div class="warn-note" id="ref-none-note" hidden>
+          A reference object is <strong>required</strong> for real measurements. Without one, you'll get the foot shape only &mdash; no millimeters, no inches.
+        </div>
+
+        <div class="tips">
+          <h3>Photo tips</h3>
+          <ul>
+            <li>Plain, contrasting floor or a light sheet under your foot</li>
+            <li>Hold the phone <strong>directly above</strong> your foot, pointing straight down</li>
+            <li>Good, even light &mdash; avoid shadows across the foot</li>
+            <li>Place the quarter/card <strong>beside</strong> your foot, not under it</li>
+            <li>Bare foot, toes visible, whole foot in frame</li>
+          </ul>
+        </div>
+
+        <button class="btn btn-primary" id="btn-to-capture" disabled>Continue to camera</button>
+      </div>
+    </section>
+
+    <!-- ============ STEP 3: CAPTURE ============ -->
+    <section class="step" id="step-capture" aria-label="Capture photo">
+      <div class="card">
+        <h2>Take the photo</h2>
+
+        <div id="camera-ui">
+          <div class="viewfinder">
+            <video id="video" playsinline muted autoplay></video>
+            <svg class="overlay" viewBox="0 0 300 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+              <!-- foot silhouette outline -->
+              <path d="M105 90
+                       C 95 120, 88 160, 90 210
+                       C 92 260, 100 300, 110 330
+                       L 112 352 C 113 360, 122 362, 126 356 L 132 340
+                       C 136 330, 144 330, 148 340 L 156 356
+                       C 160 362, 168 360, 169 352 L 170 330
+                       C 172 300, 178 260, 178 210
+                       C 178 160, 168 120, 155 90
+                       C 140 70, 120 70, 105 90 Z"
+                    fill="none" stroke="#4ade80" stroke-width="3" stroke-dasharray="10 6"/>
+              <!-- quarter guide circle -->
+              <g id="guide-quarter">
+                <circle cx="222" cy="300" r="26" fill="none" stroke="#ffd54a" stroke-width="3" stroke-dasharray="8 5"/>
+                <text x="222" y="340" text-anchor="middle" fill="#ffd54a" font-size="13" font-family="monospace">quarter</text>
+              </g>
+              <!-- card guide rectangle -->
+              <g id="guide-card" visibility="hidden">
+                <rect x="196" y="272" width="66" height="42" rx="6" fill="none" stroke="#ffd54a" stroke-width="3" stroke-dasharray="8 5"/>
+                <text x="229" y="332" text-anchor="middle" fill="#ffd54a" font-size="13" font-family="monospace">card</text>
+              </g>
+              <text x="150" y="30" text-anchor="middle" fill="#ffffff" font-size="14" font-family="monospace" opacity="0.9">fit foot inside outline</text>
+            </svg>
+          </div>
+          <div class="shutter-wrap">
+            <button class="shutter" id="btn-shutter" aria-label="Take photo"></button>
+          </div>
+          <p class="small" style="text-align:center;">Using rear camera if available.</p>
+        </div>
+
+        <div id="fallback-ui" hidden>
+          <p>Live camera isn't available on this device or was denied. You can still take a photo with your camera app or pick an existing one:</p>
+          <input type="file" id="file-camera" accept="image/*" capture="environment" class="visually-hidden">
+          <input type="file" id="file-upload" accept="image/*" class="visually-hidden">
+          <button class="btn btn-primary" id="btn-file-camera">Take photo</button>
+          <button class="btn btn-secondary" id="btn-file-upload">Upload image</button>
+        </div>
+
+        <div class="thumb-wrap" id="thumb-wrap" hidden>
+          <img id="thumb" alt="Your foot photo preview">
+          <div class="dl-row">
+            <button class="btn btn-secondary" id="btn-retake">Retake</button>
+            <button class="btn btn-primary" id="btn-process">Process scan</button>
+          </div>
+        </div>
+
+        <button class="btn btn-ghost" id="btn-back-setup">&larr; Back to setup</button>
+      </div>
+    </section>
+
+    <!-- ============ STEP 4: PROCESSING ============ -->
+    <section class="step" id="step-processing" aria-label="Processing">
+      <div class="card">
+        <div class="spinner-wrap">
+          <div class="spinner" role="status" aria-label="Processing"></div>
+          <h2>Generating your CAD drawing&hellip;</h2>
+          <p class="small">Your photo is deleted right after the drawing is made. Only the drawing survives.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ STEP 5: RESULTS ============ -->
+    <section class="step" id="step-results" aria-label="Results">
+      <div class="card">
+        <h2>Your CAD drawing</h2>
+        <div class="warning-list" id="results-warnings" hidden>
+          <h3>&#9888; ESTIMATED &mdash; verify with physical measurement</h3>
+          <ul id="warnings-list"></ul>
+        </div>
+        <div id="results-error" class="error-box" hidden></div>
+        <div id="results-body" hidden>
+          <div class="result-svg" id="svg-holder"></div>
+          <div class="thumb-wrap">
+            <img id="png-preview" alt="Foot CAD drawing preview">
+          </div>
+          <table class="measure" aria-label="Measurements">
+            <thead>
+              <tr><th>Measurement</th><th style="text-align:right;">Value</th></tr>
+            </thead>
+            <tbody id="measure-body"></tbody>
+          </table>
+          <p class="small" id="calibration-note"></p>
+          <div class="dl-row">
+            <button class="btn btn-primary" id="btn-dl-svg">Download SVG</button>
+            <button class="btn btn-primary" id="btn-dl-png">Download PNG</button>
+          </div>
+          <button class="btn btn-secondary" id="btn-again">Scan again</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="promise">
+    Photo deleted after processing<span class="dot">&middot;</span>No trackers<span class="dot">&middot;</span>No cookies<br>
+    <a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a> &middot; <a href="mailto:squachacers@gmail.com">Contact</a>
+  </footer>
+
+  <!-- ============ CONSENT MODAL ============ -->
+  <div class="modal-backdrop" id="consent-backdrop" role="dialog" aria-modal="true" aria-labelledby="consent-title">
+    <div class="modal">
+      <h2 id="consent-title">Consent: foot-photo processing</h2>
+      <p>This scanner processes a photo of your foot (<strong>biometric data</strong>) to measure it.</p>
+      <p>Your photo is processed in memory and <strong>permanently deleted immediately</strong> after your CAD drawing is generated. We keep only a timestamped record that you consented &mdash; no photo, no name.</p>
+      <label class="consent
