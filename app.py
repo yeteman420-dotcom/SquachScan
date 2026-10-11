@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -201,6 +201,7 @@ def get_3d_model():
     import os, io, struct
     import numpy as np
     length_mm = request.args.get("length_mm", type=float)
+    width_mm = request.args.get("width_mm", type=float)  # ball width, optional
     fmt = request.args.get("format", "obj")
     model_path = os.path.join(os.path.dirname(__file__), "static", "demo-foot.obj")
     if not length_mm or length_mm <= 0:
@@ -240,8 +241,14 @@ def get_3d_model():
         hc = len(verts); verts = np.vstack([verts, [[0,0,35]]])
         for j in range(n_ar):
             faces.append([hc, (j+1)%n_ar, j])
-        # Scale to requested length
-        verts *= (length_mm / 230.9)
+        # Scale to requested length (X) and width (Y, ball width 90.7mm ref)
+        # Height (Z) scales with length proportionally
+        sx = length_mm / 230.9
+        sy = (width_mm / 90.7) if width_mm and width_mm > 0 else sx
+        sz = sx  # height follows length
+        verts[:, 0] *= sx
+        verts[:, 1] *= sy
+        verts[:, 2] *= sz
         faces = np.array(faces, dtype=np.int32)
         if fmt == "stl":
             buf = io.BytesIO()
@@ -253,8 +260,11 @@ def get_3d_model():
                     buf.write(struct.pack('<3f', *verts[vi]))
                 buf.write(struct.pack('<H', 0))
             buf.seek(0)
+            dl = "foot-3d-%.0fmm" % length_mm
+            if width_mm and width_mm > 0:
+                dl += "-w%.0fmm" % width_mm
             return send_file(buf, mimetype="model/stl", as_attachment=True,
-                             download_name="foot-3d-%.0fmm.stl" % length_mm)
+                             download_name=dl + ".stl")
         else:
             lines = ["# parametric foot %.1fmm" % length_mm]
             for v in verts:
@@ -262,8 +272,11 @@ def get_3d_model():
             for f in faces:
                 lines.append("f %d %d %d" % (f[0]+1, f[1]+1, f[2]+1))
             buf = io.BytesIO(("\n".join(lines)).encode())
+            dl = "foot-3d-%.0fmm" % length_mm
+            if width_mm and width_mm > 0:
+                dl += "-w%.0fmm" % width_mm
             return send_file(buf, mimetype="model/obj", as_attachment=True,
-                             download_name="foot-3d-%.0fmm.obj" % length_mm)
+                             download_name=dl + ".obj")
     except Exception:
         return send_file(model_path, mimetype="model/obj",
                          as_attachment=True, download_name="foot-3d.obj")
