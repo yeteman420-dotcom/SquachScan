@@ -32,6 +32,14 @@
           </ul>
         </div>
         <button class="btn btn-primary" id="btn-start">Start scan</button>
+        <div style="text-align:center; margin-top:16px; padding-top:16px; border-top:1px solid #e5e7eb;">
+          <p class="small" style="margin-bottom:8px;">Already know your foot length?</p>
+          <div style="display:flex; gap:8px; justify-content:center; align-items:center; flex-wrap:wrap;">
+            <input type="number" id="manual-length" placeholder="mm (e.g. 270)" min="150" max="350" style="width:130px; padding:10px; border:2px solid #1e3a5f; border-radius:8px; font-size:16px;">
+            <button class="btn btn-secondary" id="btn-3d-direct" style="padding:10px 20px;">Get 3D Model</button>
+          </div>
+          <p class="small" style="margin-top:8px; color:#666;">US size to mm: 9=270, 10=280, 11=290, 12=300</p>
+        </div>
         <p class="small" style="text-align:center; margin-top:12px;">
           <a href="/privacy">Privacy policy</a> &middot; <a href="/terms">Terms</a>
         </p>
