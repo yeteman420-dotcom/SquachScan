@@ -1,22 +1,31 @@
-"""ModToes Foot Scanner v2 — OpenCV measurement pipeline.
+"""ModToes Foot Scanner v3 — measurement pipeline with neural segmentation.
 
 PRIVACY-BY-DESIGN (non-negotiable):
 - The photo lives ONLY in memory: raw upload bytes -> Pillow -> numpy array.
   This module NEVER writes the image (or any derivative) to disk.
+  The ONNX model weights are loaded from the local models/ directory
+  (downloaded once at build time); they contain no user data.
 - EXIF metadata (including GPS) is stripped BEFORE any processing or
   measurement. The re-encoded JPEG carries zero metadata; we verify that.
+- No network calls are made during a scan. Ever.
 - Callers must not log image bytes, filenames, or pixel dimensions. The
   `debug` dict returned here contains only geometric/technical notes.
 
 What this does:
   1. strip_exif()      - Pillow re-encode to RGB JPEG, zero metadata, verified.
   2. decode + downscale to max dim 1200px (scale factor tracked).
-  3. segment_foot()    - Otsu (both polarities) -> close -> largest sane
-                         contour; GrabCut fallback; raises NoFootFound.
-  4. reference detect  - quarter via HoughCircles (24.26 mm), credit card
-                         via approxPolyDP quadrilaterals (85.60 x 53.98 mm).
-                         If the requested reference is not found we return
-                         calibrated=False and NEVER guess a scale.
+  3. segment_foot()    - U^2-Net (u2netp, ONNX Runtime CPU) salient-object
+                         segmentation -> upscale -> morphological refine ->
+                         largest connected component -> contour.
+                         LAST-RESORT fallback: classical Otsu (both
+                         polarities) -> GrabCut. Raises NoFootFound.
+  4. reference detect  - quarter via HoughCircles (24.26 mm) with
+                         circularity/size/position sanity checks; credit
+                         card via approxPolyDP quadrilaterals (85.60 x
+                         53.98 mm) with rectangularity/overlap checks.
+                         Absurd detections are rejected, never calibrated
+                         from. If the requested reference is not found we
+                         return calibrated=False and NEVER guess a scale.
   5. landmarks         - PCA long axis; length = max extent heel->toe;
                          widths at stations along the minor axis.
   6. process_scan()    - returns drawing-ready geometry + measurements.
@@ -29,6 +38,8 @@ from __future__ import annotations
 
 import io
 import math
+import os
+import threading
 
 import cv2
 import numpy as np
@@ -55,6 +66,143 @@ QUARTER_FRAC_MAX = 0.16
 
 ESTIMATED_WARNING = "ESTIMATED \u2014 verify with physical measurement"
 
+# --------------------------------------------------------------------------
+# Neural segmentation (U^2-Net "u2netp", ONNX Runtime, CPU only)
+# --------------------------------------------------------------------------
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.environ.get("SCAN_MODEL_DIR", os.path.join(BASE_DIR, "models"))
+MODEL_PATH = os.path.join(MODEL_DIR, "u2netp.onnx")
+# Canonical weights source (NOT bundled in git; fetched at build time).
+MODEL_URL = ("https://github.com/danielgatis/rembg/releases/download/"
+             "v0.0.0/u2netp.onnx")
+MODEL_SHA256 = "309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8"
+MODEL_SIZE = 4574861                # bytes, expected
+
+SEG_INPUT = 320                     # u2netp native input edge (square)
+SEG_MASK_THRESHOLD = 0.5
+
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+_session = None
+_session_lock = threading.Lock()
+_session_input_name = None
+_session_output_name = None
+
+
+def _get_session():
+    """Lazily load the ONNX session (once per process/worker).
+
+    Lazy so a missing/corrupt weights file cannot crash app startup, and
+    so each gunicorn worker builds its own session AFTER fork (ONNX
+    Runtime sessions must not cross a fork). Session.run() is thread-safe.
+    """
+    global _session, _session_input_name, _session_output_name
+    if _session is None:
+        with _session_lock:
+            if _session is None:
+                if not os.path.isfile(MODEL_PATH):
+                    raise ModelMissing(
+                        "Segmentation model not found. Run "
+                        "scripts/fetch_model.py, or ensure the build step "
+                        "downloaded the weights.")
+                try:
+                    import onnxruntime as ort
+                except ImportError as e:
+                    raise ModelMissing(
+                        "onnxruntime is not installed.") from e
+                so = ort.SessionOptions()
+                # Keep thread usage modest: gunicorn runs 2 threads/worker.
+                so.intra_op_num_threads = 2
+                so.inter_op_num_threads = 1
+                so.graph_optimization_level = (
+                    ort.GraphOptimizationLevel.ORT_ENABLE_ALL)
+                try:
+                    sess = ort.InferenceSession(
+                        MODEL_PATH, sess_options=so,
+                        providers=["CPUExecutionProvider"])
+                except Exception as e:
+                    raise ModelMissing(
+                        f"Could not load segmentation model: {e}") from e
+                _session = sess
+                _session_input_name = sess.get_inputs()[0].name
+                _session_output_name = sess.get_outputs()[0].name
+    return _session
+
+
+def _u2net_mask(bgr: np.ndarray) -> np.ndarray | None:
+    """Run u2netp on the image; return float32 saliency map in [0,1]
+    at the input image size, or None if the model is unavailable."""
+    try:
+        sess = _get_session()
+    except ModelMissing:
+        return None
+    h, w = bgr.shape[:2]
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    small = cv2.resize(rgb, (SEG_INPUT, SEG_INPUT),
+                       interpolation=cv2.INTER_AREA)
+    x = small.astype(np.float32) / 255.0
+    x = (x - _IMAGENET_MEAN) / _IMAGENET_STD
+    x = x.transpose(2, 0, 1)[np.newaxis].astype(np.float32)
+    try:
+        logits = sess.run([_session_output_name],
+                          {_session_input_name: x})[0]
+    except Exception:
+        return None
+    # NOTE: this u2netp export emits raw logits that are NOT sigmoid-
+    # calibrated (sigmoid maps everything to ~0.5-0.7, i.e. all-foreground).
+    # Follow rembg's u2net handling: min-max normalize to [0,1] instead.
+    pred = logits[0, 0].astype(np.float64)
+    pmin, pmax = pred.min(), pred.max()
+    if pmax - pmin < 1e-6:
+        return None
+    prob = ((pred - pmin) / (pmax - pmin)).astype(np.float32)
+    # Upscale to working resolution (bilinear keeps soft edges for cleanup).
+    return cv2.resize(prob, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def _mask_to_contour(mask_bin: np.ndarray, img_area: float,
+                     img_w: int, img_h: int):
+    """Largest connected component of a binary mask -> contour, or None."""
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask_bin, connectivity=8)
+    best = None
+    best_area = 0
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if not (0.03 * img_area <= area <= 0.70 * img_area):
+            continue
+        comp = (labels == i).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(
+            comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            continue
+        c = max(contours, key=cv2.contourArea)
+        if _contour_passes_sanity(c, img_area, img_w, img_h):
+            if area > best_area:
+                best, best_area = c, area
+    return best
+
+
+def _segment_with_model(bgr: np.ndarray):
+    """Neural segmentation. Returns (contour, note) or (None, reason)."""
+    h, w = bgr.shape[:2]
+    img_area = float(h * w)
+    prob = _u2net_mask(bgr)
+    if prob is None:
+        return None, "model unavailable"
+    for invert in (False, True):
+        m = (prob < SEG_MASK_THRESHOLD) if invert else (prob > SEG_MASK_THRESHOLD)
+        bin_mask = m.astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_CLOSE, kernel)
+        bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_OPEN, kernel)
+        c = _mask_to_contour(bin_mask, img_area, w, h)
+        if c is not None:
+            return c, "u2net" + ("-inv" if invert else "")
+    return None, "no sane mask from model"
+
 
 # --------------------------------------------------------------------------
 # Errors
@@ -70,6 +218,10 @@ class BadImageError(ScanError):
 
 class NoFootFound(ScanError):
     """Segmentation could not find a plausible foot contour."""
+
+
+class ModelMissing(ScanError):
+    """The segmentation model weights are not present on disk."""
 
 
 # --------------------------------------------------------------------------
@@ -166,13 +318,10 @@ def _grabcut_fallback(bgr: np.ndarray, img_area: float):
     return best
 
 
-def segment_foot(bgr: np.ndarray):
-    """Return (contour, method_note). Raises NoFootFound."""
-    h, w = bgr.shape[:2]
-    img_area = float(h * w)
+def _otsu_segment(bgr: np.ndarray, img_area: float, img_w: int, img_h: int):
+    """Classical Otsu segmentation (kept as last-resort fallback)."""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (9, 9), 0)
-
     best = None
     best_area = 0.0
     for polarity in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
@@ -186,10 +335,28 @@ def segment_foot(bgr: np.ndarray):
         # the stored outline later.
         contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         for c in contours:
-            if _contour_passes_sanity(c, img_area, w, h):
+            if _contour_passes_sanity(c, img_area, img_w, img_h):
                 a = cv2.contourArea(c)
                 if a > best_area:
                     best, best_area = c, a
+    return best
+
+
+def segment_foot(bgr: np.ndarray):
+    """Return (contour, method_note). Raises NoFootFound.
+
+    Primary: U^2-Net neural segmentation (carpet-proof). Last resort:
+    classical Otsu, then GrabCut — same as v2.
+    """
+    h, w = bgr.shape[:2]
+    img_area = float(h * w)
+
+    contour, note = _segment_with_model(bgr)
+    if contour is not None:
+        return contour, note
+
+    # LAST-RESORT classical fallbacks (v2 behavior).
+    best = _otsu_segment(bgr, img_area, w, h)
     if best is not None:
         return best, "otsu"
 
@@ -286,11 +453,124 @@ def compute_landmarks(contour) -> dict:
 
 
 # --------------------------------------------------------------------------
-# 4. Reference detection
+# 4. Reference detection (hardened)
 # --------------------------------------------------------------------------
 
-def _detect_quarter(gray: np.ndarray, foot_contour, foot_length_px: float):
-    """HoughCircles; pick the in-range circle. Returns diameter px or None."""
+def _circle_edge_support(gray: np.ndarray, x: float, y: float, r: float,
+                         frac: float = 0.45) -> bool:
+    """Check that a decent fraction of the circle's circumference is
+    supported by real edges (rejects Hough hallucinations on texture)."""
+    edges = cv2.Canny(gray, 60, 180)
+    n = 72
+    hits = 0
+    h, w = edges.shape
+    for i in range(n):
+        a = 2.0 * math.pi * i / n
+        px = int(round(x + r * math.cos(a)))
+        py = int(round(y + r * math.sin(a)))
+        if 1 <= px < w - 1 and 1 <= py < h - 1:
+            if np.any(edges[py - 1:py + 2, px - 1:px + 2] > 0):
+                hits += 1
+    return (hits / n) >= frac
+
+
+def _refine_circle_radius(gray: np.ndarray, x: float, y: float,
+                         r0: float) -> float:
+    """Refine a Hough circle's (center, radius) by conservative hill-climbing.
+
+    Hough's estimate is usually close; a global search can jump to
+    spurious texture maxima. Instead, hill-climb from (x,y,r0): at each
+    step try all 26 neighbors (dx,dy,dr in {-1,0,1}px), move to the best
+    if it strictly improves Canny edge support, stop when no improvement
+    or after 10 steps. Total drift is capped at 5px from the start, so
+    the refinement can fix small Hough errors but never jump to a
+    pattern ghost.
+    """
+    edges = (cv2.Canny(gray, 60, 180) > 0)
+    h, w = edges.shape
+    n = 144
+    cos_a = np.cos(2.0 * np.pi * np.arange(n) / n)
+    sin_a = np.sin(2.0 * np.pi * np.arange(n) / n)
+
+    def precise_support(cx: float, cy: float, r: float) -> float:
+        px = np.round(cx + r * cos_a).astype(int)
+        py = np.round(cy + r * sin_a).astype(int)
+        valid = (px >= 0) & (px < w) & (py >= 0) & (py < h)
+        if not np.any(valid):
+            return 0.0
+        return float(edges[py[valid], px[valid]].mean())
+
+    cx, cy, r = float(x), float(y), float(r0)
+    cur = precise_support(cx, cy, r)
+    for _ in range(10):
+        improved = False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dr in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dr == 0:
+                        continue
+                    nx, ny, nr = cx + dx, cy + dy, r + dr
+                    if abs(nx - x) > 5 or abs(ny - y) > 5 or abs(nr - r0) > 5:
+                        continue
+                    s = precise_support(nx, ny, nr)
+                    if s > cur + 1e-9:
+                        cx, cy, r, cur = nx, ny, nr, s
+                        improved = True
+        if not improved:
+            break
+    return r
+
+
+def _detect_quarter_contour(gray: np.ndarray, foot_contour,
+                            foot_length_px: float, img_w: int, img_h: int):
+    """Fallback quarter detector: contour circularity.
+
+    More reliable than HoughCircles when the coin's edge is clean but
+    background texture confuses the Hough accumulator. Finds edge
+    contours, keeps those with high circularity whose enclosing circle
+    is in the expected size range, outside the foot, fully in frame.
+    Returns diameter px or None.
+    """
+    edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_NONE)
+    best = None
+    for c in contours:
+        peri = cv2.arcLength(c, True)
+        if peri < 60:
+            continue
+        area = cv2.contourArea(c)
+        if area < 1e-6:
+            continue
+        circularity = 4.0 * math.pi * area / (peri * peri)
+        if circularity < 0.78:
+            continue
+        (x, y), r = cv2.minEnclosingCircle(c)
+        d = 2.0 * r
+        if not (QUARTER_FRAC_MIN * foot_length_px <= d
+                <= QUARTER_FRAC_MAX * foot_length_px):
+            continue
+        if x - r < 2 or y - r < 2 or x + r > img_w - 2 or y + r > img_h - 2:
+            continue
+        if cv2.pointPolygonTest(foot_contour, (float(x), float(y)), False) >= 0:
+            continue
+        if not _circle_edge_support(gray, float(x), float(y), float(r)):
+            continue
+        rr = _refine_circle_radius(gray, float(x), float(y), float(r))
+        score = circularity * (rr / r)  # prefer tight, well-supported fits
+        if best is None or score > best[0]:
+            best = (score, x, y, rr)
+    return float(2 * best[3]) if best else None
+
+
+def _detect_quarter(gray: np.ndarray, foot_contour, foot_length_px: float,
+                    img_w: int, img_h: int):
+    """HoughCircles + sanity checks. Returns diameter px or None.
+
+    Sanity checks: diameter in the expected fraction of foot length,
+    circle fully inside the image, center outside the foot mask, and
+    real edge support around the circumference (kills texture ghosts).
+    """
     blur = cv2.medianBlur(gray, 5)
     min_r = int(foot_length_px * QUARTER_FRAC_MIN / 2)
     max_r = int(foot_length_px * QUARTER_FRAC_MAX / 2)
@@ -302,23 +582,152 @@ def _detect_quarter(gray: np.ndarray, foot_contour, foot_length_px: float):
         param1=100, param2=25,
         minRadius=min_r, maxRadius=max_r,
     )
-    if circles is None:
-        return None
     best = None
-    for x, y, r in circles[0]:
-        d = float(2 * r)
-        if not (QUARTER_FRAC_MIN * foot_length_px <= d <= QUARTER_FRAC_MAX * foot_length_px):
-            continue
-        # Reject circles sitting on the foot itself.
-        if cv2.pointPolygonTest(foot_contour, (float(x), float(y)), False) >= 0:
-            continue
-        if best is None or r > best[2]:
-            best = (x, y, r)
-    return float(2 * best[2]) if best else None
+    if circles is not None:
+        for x, y, r in circles[0]:
+            d = float(2 * r)
+            if not (QUARTER_FRAC_MIN * foot_length_px <= d <= QUARTER_FRAC_MAX * foot_length_px):
+                continue
+            # Circle must lie fully inside the frame.
+            if x - r < 2 or y - r < 2 or x + r > img_w - 2 or y + r > img_h - 2:
+                continue
+            # Reject circles sitting on the foot itself.
+            if cv2.pointPolygonTest(foot_contour, (float(x), float(y)), False) >= 0:
+                continue
+            # Reject texture hallucinations: need real edge support.
+            if not _circle_edge_support(gray, float(x), float(y), float(r)):
+                continue
+            # Refine the radius against pattern interference.
+            rr = _refine_circle_radius(gray, float(x), float(y), float(r))
+            if best is None or rr > best[2]:
+                best = (x, y, rr)
+    if best is not None:
+        return float(2 * best[2])
+    # Fallback: contour-circularity detector (robust when texture defeats
+    # the Hough accumulator but the coin edge itself is clean).
+    return _detect_quarter_contour(gray, foot_contour, foot_length_px,
+                                    img_w, img_h)
 
 
-def _detect_card(gray: np.ndarray, foot_contour, foot_area: float, img_area: float):
-    """Quadrilateral with credit-card aspect ratio. Returns long-side px or None."""
+def _quad_rectangularity(approx) -> bool:
+    """Area ratio + corner angles near 90 degrees."""
+    pts = approx.reshape(4, 2).astype(np.float64)
+    area = cv2.contourArea(approx)
+    (_, _), (rw, rh), _ = cv2.minAreaRect(approx)
+    if min(rw, rh) < 1e-6:
+        return False
+    if area / (rw * rh) < 0.88:
+        return False
+    # Corner angles: each interior angle should be within ~20 deg of 90.
+    for i in range(4):
+        p0 = pts[i]
+        p1 = pts[(i + 1) % 4] - p0
+        p2 = pts[(i - 1) % 4] - p0
+        n1 = np.linalg.norm(p1)
+        n2 = np.linalg.norm(p2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return False
+        cos_a = float(np.dot(p1, p2) / (n1 * n2))
+        cos_a = max(-1.0, min(1.0, cos_a))
+        ang = math.degrees(math.acos(cos_a))
+        if abs(ang - 90.0) > 20.0:
+            return False
+    return True
+
+
+def _detect_card_uniformity(gray: np.ndarray, foot_contour, foot_area: float,
+                            img_area: float, foot_mask: np.ndarray | None):
+    """Fallback card detector for high-contrast patterned backgrounds.
+
+    A credit card is a manufactured flat-color object: its interior has
+    far lower local color variance than carpet/rug texture. Find large
+    low-variance rectangular blobs, then re-run precise edge-based quad
+    detection in a tight ROI around each candidate.
+    Returns long-side px or None.
+    """
+    h, w = gray.shape
+    g = gray.astype(np.float32)
+    mean = cv2.blur(g, (15, 15))
+    sqmean = cv2.blur(g * g, (15, 15))
+    std = np.sqrt(np.maximum(sqmean - mean * mean, 0.0))
+    uniform = (std < 7.0).astype(np.uint8) * 255
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    closed = cv2.morphologyEx(uniform, cv2.MORPH_CLOSE, k)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(closed, 8)
+
+    candidates = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if not (0.002 * img_area <= area <= 0.35 * img_area):
+            continue
+        if area > 0.60 * foot_area:
+            continue
+        bx, by = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+        bw, bh = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
+        if min(bw, bh) < 1e-6:
+            continue
+        aspect = max(bw, bh) / min(bw, bh)
+        if abs(aspect - CARD_ASPECT) > 0.25:  # loose pre-filter
+            continue
+        cx, cy = bx + bw / 2.0, by + bh / 2.0
+        if cv2.pointPolygonTest(foot_contour, (cx, cy), False) >= 0:
+            continue
+        candidates.append((area, bx, by, bw, bh))
+    candidates.sort(reverse=True)
+
+    for _, bx, by, bw, bh in candidates[:3]:
+        m = 25
+        x0, y0 = max(0, bx - m), max(0, by - m)
+        x1, y1 = min(w, bx + bw + m), min(h, by + bh + m)
+        roi = gray[y0:y1, x0:x1]
+        blur = cv2.GaussianBlur(roi, (5, 5), 0)
+        edges = cv2.Canny(blur, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        for c in sorted(contours, key=cv2.contourArea, reverse=True)[:6]:
+            peri = cv2.arcLength(c, True)
+            if peri < 40:
+                continue
+            hull = cv2.convexHull(c)
+            approx = cv2.approxPolyDP(
+                hull, 0.02 * cv2.arcLength(hull, True), True)
+            if len(approx) != 4 or not cv2.isContourConvex(approx):
+                continue
+            area = cv2.contourArea(approx)
+            if not (0.002 * img_area <= area <= 0.35 * img_area):
+                continue
+            (_, _), (rw, rh), _ = cv2.minAreaRect(approx)
+            if min(rw, rh) < 1e-6:
+                continue
+            aspect = max(rw, rh) / min(rw, rh)
+            if abs(aspect - CARD_ASPECT) > CARD_ASPECT_TOL:
+                continue
+            if not _quad_rectangularity(approx):
+                continue
+            # back to full-image coords for foot checks
+            approx_full = approx + np.array([[[x0, y0]]])
+            cx = float(approx_full[:, 0, 0].mean())
+            cy = float(approx_full[:, 0, 1].mean())
+            if cv2.pointPolygonTest(foot_contour, (cx, cy), False) >= 0:
+                continue
+            if foot_mask is not None:
+                qm = np.zeros_like(foot_mask)
+                cv2.drawContours(qm, [approx_full], -1, 255, cv2.FILLED)
+                overlap = float(np.logical_and(qm > 0, foot_mask > 0).sum())
+                if overlap > 0.15 * area:
+                    continue
+            return float(max(rw, rh))
+    return None
+
+
+def _detect_card(gray: np.ndarray, foot_contour, foot_area: float,
+                 img_area: float, foot_mask: np.ndarray | None = None):
+    """Quadrilateral with credit-card aspect ratio. Returns long-side px or None.
+
+    Sanity checks: convex quad, area in range, card aspect ratio,
+    rectangularity (area ratio + corner angles), center outside the foot,
+    and minimal overlap with the foot mask (a card never sits under a foot).
+    """
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -327,27 +736,44 @@ def _detect_card(gray: np.ndarray, foot_contour, foot_area: float, img_area: flo
         peri = cv2.arcLength(c, True)
         if peri < 40:
             continue
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        # Convex hull first: pattern edges abutting the card create
+        # concave indentations; the hull recovers the card's rectangle.
+        hull = cv2.convexHull(c)
+        approx = cv2.approxPolyDP(hull, 0.02 * cv2.arcLength(hull, True), True)
         if len(approx) != 4 or not cv2.isContourConvex(approx):
             continue
         area = cv2.contourArea(approx)
         if not (0.002 * img_area <= area <= 0.35 * img_area):
             continue
-        if area > 0.35 * foot_area:
-            continue  # a card is far smaller than a foot
+        if area > 0.60 * foot_area:
+            continue  # a card is far smaller than a foot (0.6 keeps
+                      # headroom for small/narrow feet; real ratio ~0.2)
         (_, _), (rw, rh), _ = cv2.minAreaRect(approx)
         if min(rw, rh) < 1e-6:
             continue
         aspect = max(rw, rh) / min(rw, rh)
         if abs(aspect - CARD_ASPECT) > CARD_ASPECT_TOL:
             continue
+        if not _quad_rectangularity(approx):
+            continue
         cx, cy = float(approx[:, 0, 0].mean()), float(approx[:, 0, 1].mean())
         if cv2.pointPolygonTest(foot_contour, (cx, cy), False) >= 0:
             continue
+        if foot_mask is not None:
+            quad_mask = np.zeros_like(foot_mask)
+            cv2.drawContours(quad_mask, [approx], -1, 255, cv2.FILLED)
+            overlap = float(np.logical_and(quad_mask > 0, foot_mask > 0).sum())
+            if overlap > 0.15 * area:
+                continue
         long_side = float(max(rw, rh))
         if best is None or long_side > best:
             best = long_side
-    return best
+    if best is not None:
+        return best
+    # Fallback for high-contrast patterned backgrounds where pattern edges
+    # merge with the card's boundary: uniformity-based ROI detection.
+    return _detect_card_uniformity(gray, foot_contour, foot_area,
+                                   img_area, foot_mask)
 
 
 # --------------------------------------------------------------------------
@@ -376,9 +802,13 @@ def process_scan(image_bytes: bytes, foot_side: str = "left", reference: str = "
     work = bgr if scale >= 1.0 else cv2.resize(
         bgr, (int(w0 * scale), int(h0 * scale)), interpolation=cv2.INTER_AREA)
 
-    # 3. Segment.
+    # 3. Segment (neural primary, classical last resort).
     contour, seg_method = segment_foot(work)
     gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+
+    # Foot mask (for reference overlap checks), in working resolution.
+    foot_mask = np.zeros(gray.shape, np.uint8)
+    cv2.drawContours(foot_mask, [contour], -1, 255, cv2.FILLED)
 
     # 5. Landmarks (working px).
     lm = compute_landmarks(contour)
@@ -390,15 +820,16 @@ def process_scan(image_bytes: bytes, foot_side: str = "left", reference: str = "
     # 4. Reference -> px_per_mm (in ORIGINAL image px).
     px_per_mm = None
     ref_note = "none requested"
+    wh, ww = gray.shape[:2]
     if reference == "quarter":
-        d_work = _detect_quarter(gray, contour, lm["length_px"])
+        d_work = _detect_quarter(gray, contour, lm["length_px"], ww, wh)
         if d_work:
             px_per_mm = (d_work * inv) / QUARTER_DIAMETER_MM
             ref_note = f"quarter d={d_work * inv:.1f}px"
         else:
             ref_note = "quarter requested but not detected"
     elif reference == "card":
-        long_work = _detect_card(gray, contour, foot_area, img_area)
+        long_work = _detect_card(gray, contour, foot_area, img_area, foot_mask)
         if long_work:
             px_per_mm = (long_work * inv) / CARD_LONG_MM
             ref_note = f"card long_side={long_work * inv:.1f}px"
