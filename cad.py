@@ -1,4 +1,4 @@
-"""ModToes Foot Scanner v2 — CAD renderer.
+"""ModToes Foot Scanner v3 — CAD renderer.
 
 Shared drawing model: one FootDrawing produces both a standalone SVG string
 (to_svg) and PNG bytes rendered with Pillow only (to_png). No extra
