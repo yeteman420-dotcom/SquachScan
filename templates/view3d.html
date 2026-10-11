@@ -40,11 +40,21 @@ function setStatus(t) { statusEl.textContent = t; }
 // Get length_mm from URL, fetch the scaled model
 const params = new URLSearchParams(window.location.search);
 const lengthMm = params.get('length_mm');
-const modelUrl = lengthMm ? '/api/3d-model?length_mm=' + encodeURIComponent(lengthMm) : '/api/3d-model';
+const widthMm = params.get('width_mm');
+let modelUrl = '/api/3d-model';
+const qp = [];
+if (lengthMm) qp.push('length_mm=' + encodeURIComponent(lengthMm));
+if (widthMm) qp.push('width_mm=' + encodeURIComponent(widthMm));
+if (qp.length) modelUrl += '?' + qp.join('&');
 if (lengthMm) {
-  document.querySelector('#hud p').textContent += ' • ' + lengthMm + 'mm';
-  document.getElementById('dl-link').href = modelUrl + '&format=stl';
-  document.getElementById('dl-link').download = 'foot-3d-' + lengthMm + 'mm.stl';
+  let lbl = lengthMm + 'mm';
+  if (widthMm) lbl += ' \u00d7 ' + widthMm + 'mm';
+  document.querySelector('#hud p').textContent += ' \u2022 ' + lbl;
+  const sep = modelUrl.includes('?') ? '&' : '?';
+  document.getElementById('dl-link').href = modelUrl + sep + 'format=stl';
+  let dl = 'foot-3d-' + lengthMm + 'mm';
+  if (widthMm) dl += '-w' + widthMm + 'mm';
+  document.getElementById('dl-link').download = dl + '.stl';
 }
 
 let renderer;
