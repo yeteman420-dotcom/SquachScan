@@ -30,12 +30,22 @@
 </div>
 <div id="status">Loading 3D model...</div>
 <div id="hint">Drag to spin &bull; pinch to zoom</div>
-<div id="dl"><a href="/api/3d-model" download="foot-3d.obj">Download 3D model</a></div>
+<div id="dl"><a id="dl-link" href="/api/3d-model" download="foot-3d.obj">Download 3D model</a></div>
 <canvas id="c"></canvas>
 <script>
 (function() {
 const statusEl = document.getElementById('status');
 function setStatus(t) { statusEl.textContent = t; }
+
+// Get length_mm from URL, fetch the scaled model
+const params = new URLSearchParams(window.location.search);
+const lengthMm = params.get('length_mm');
+const modelUrl = lengthMm ? '/api/3d-model?length_mm=' + encodeURIComponent(lengthMm) : '/api/3d-model';
+if (lengthMm) {
+  document.querySelector('#hud p').textContent += ' • ' + lengthMm + 'mm';
+  document.getElementById('dl-link').href = modelUrl + '&format=stl';
+  document.getElementById('dl-link').download = 'foot-3d-' + lengthMm + 'mm.stl';
+}
 
 let renderer;
 try {
@@ -103,7 +113,7 @@ function parseOBJ(text){
 }
 
 setStatus('Downloading model...');
-fetch('/api/3d-model').then(r=>{
+fetch(modelUrl).then(r=>{
   if(!r.ok) throw new Error('HTTP '+r.status);
   const total=r.headers.get('content-length');
   return r.text().then(t=>({t,total}));
