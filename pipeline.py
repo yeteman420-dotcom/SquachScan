@@ -106,7 +106,8 @@ def ensure_model() -> bool:
     Safety net for hosts whose build step did not fetch the model (e.g. a
     manually-configured Render service whose buildCommand lacks the fetch
     step). Verifies size + SHA-256. Returns True if the model is ready.
-    Thread-safe via _session_lock (callers should hold it).
+    Uses a per-process tmp file + atomic replace so concurrent callers
+    are safe.
     """
     if os.path.isfile(MODEL_PATH):
         try:
@@ -115,9 +116,9 @@ def ensure_model() -> bool:
                 return True
         except OSError:
             pass
-    # Download (atomic via tmp file).
+    # Download (atomic via unique tmp file per process).
     os.makedirs(MODEL_DIR, exist_ok=True)
-    tmp = MODEL_PATH + ".dl"
+    tmp = f"{MODEL_PATH}.dl.{os.getpid()}"
     try:
         import urllib.request
         urllib.request.urlretrieve(MODEL_URL, tmp)
