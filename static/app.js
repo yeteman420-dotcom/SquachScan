@@ -58,16 +58,19 @@
     backdrop.classList.add("open");
   });
 
-  // Direct 3D: skip the photo, enter length manually
+  // Direct 3D: skip the photo, enter dimensions manually
   var btn3d = $("btn-3d-direct");
   if (btn3d) {
     btn3d.addEventListener("click", function () {
-      var v = parseFloat($("manual-length").value);
-      if (!v || v < 150 || v > 350) {
+      var l = parseFloat($("manual-length").value);
+      var w = parseFloat($("manual-width").value);
+      if (!l || l < 150 || l > 350) {
         alert("Enter your foot length in mm (150-350). US 9 ≈ 270mm.");
         return;
       }
-      window.location.href = "/3d?length_mm=" + v;
+      var url = "/3d?length_mm=" + l;
+      if (w && w >= 60 && w <= 140) url += "&width_mm=" + w;
+      window.location.href = url;
     });
   }
 
@@ -432,7 +435,11 @@
     var row3d = $("row-3d");
     var btn3d = $("btn-view-3d");
     if (m.length_mm !== null && m.length_mm !== undefined && m.length_mm !== "" && m.length_mm > 0) {
-      btn3d.href = "/3d?length_mm=" + encodeURIComponent(m.length_mm);
+      var url3d = "/3d?length_mm=" + encodeURIComponent(m.length_mm);
+      if (m.ball_width_mm !== null && m.ball_width_mm !== undefined && m.ball_width_mm !== "" && m.ball_width_mm > 0) {
+        url3d += "&width_mm=" + encodeURIComponent(m.ball_width_mm);
+      }
+      btn3d.href = url3d;
       row3d.hidden = false;
     } else {
       row3d.hidden = true;
