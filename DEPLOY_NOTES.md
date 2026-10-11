@@ -68,3 +68,15 @@ python scripts/fetch_model.py   # downloads + verifies weights once
 - Single-photo measurements remain ESTIMATES (perspective, lens distortion).
   Every drawing is labeled "ESTIMATED — VERIFY WITH PHYSICAL MEASUREMENT."
 - Not certified, not medical-grade. No precision claims beyond the method.
+
+## v3.1.0 — real-world framing fix (2026-10-11)
+- Bug: v3.0 rejected any foot touching the frame edge. Real phone photos
+  almost always have the ankle/leg running out of frame -> NO_FOOT dead end.
+- Fix: contour may touch exactly one frame edge. New framing analysis:
+  - Heel cut off by frame -> HEEL_CLIPPED error with specific guidance
+    ("pull back so your whole foot — toes to heel — is inside the frame").
+  - Toes cut off -> TOES_CLIPPED with guidance.
+  - Heel complete but ankle out of frame -> contour truncated at the ankle
+    dip so leg can't pollute the length measurement.
+- Verified on a real user photo (heel-clipped -> correct guidance) and
+  synthetic ankle-out case (truncated at ankle, not frame edge).
