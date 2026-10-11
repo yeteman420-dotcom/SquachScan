@@ -80,3 +80,4 @@ python scripts/fetch_model.py   # downloads + verifies weights once
     dip so leg can't pollute the length measurement.
 - Verified on a real user photo (heel-clipped -> correct guidance) and
   synthetic ankle-out case (truncated at ankle, not frame edge).
+
