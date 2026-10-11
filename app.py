@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.1.4"
+VERSION = "3.2.0"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -185,6 +185,23 @@ def healthz():
 @app.get("/")
 def index():
     return render_template("index.html", version=VERSION)
+
+
+@app.get("/3d")
+def view_3d():
+    return render_template("view3d.html", version=VERSION)
+
+
+@app.get("/api/3d-model")
+def get_3d_model():
+    # Serve the demo 3D foot model (Yetey's scan)
+    # In production, this will serve the user's own reconstruction
+    from flask import send_file
+    import os
+    model_path = os.path.join(os.path.dirname(__file__), "static", "demo-foot.obj")
+    if os.path.exists(model_path):
+        return send_file(model_path, mimetype="text/plain")
+    return {"error": "3D model not available yet"}, 404
 
 
 @app.get("/privacy")
