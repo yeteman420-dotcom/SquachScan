@@ -1,4 +1,7 @@
-"""ModToes Foot Scanner v2 — Flask backend.
+"""ModToes Foot Scanner v3 — Flask backend.
+
+Neural segmentation (U^2-Net via ONNX Runtime CPU) replaces the v2
+classical thresholding pipeline. Carpet-proof.
 
 PRIVACY-BY-DESIGN (non-negotiable, enforced here):
 - The photo lives ONLY in memory (request bytes -> BytesIO -> numpy).
@@ -46,7 +49,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "2.0.0"
+VERSION = "3.0.0"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
