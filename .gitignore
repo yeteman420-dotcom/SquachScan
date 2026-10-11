@@ -1,0 +1,11 @@
+# Model weights: downloaded at build time via scripts/fetch_model.py,
+# never committed (binary blob, ~4.4 MB).
+models/
+
+# Local dev environment
+venv/
+__pycache__/
+*.pyc
+
+# Local-only consent records (Render disk is ephemeral anyway)
+consent_log/*.jsonl
