@@ -583,13 +583,12 @@ def _refine_framing(contour, img_w: int, img_h: int):
             "\u2014 is fully inside the frame, then retake."
         )
     peak_rel = int(np.argmax(heel_half))
-    # Heel complete only if the width peaks and falls well before the edge.
+    # If no heel peak is visible (common when the foot is plantarflexed and
+    # the heel is tucked under), we cannot measure length. But the foot is
+    # well-segmented, so return a partial result: widths are valid, length
+    # is not. The caller marks this clearly.
     if peak_rel >= int(len(heel_half) * 0.80):
-        raise HeelClipped(
-            "We found your foot, but your heel is cut off at the edge of "
-            "the photo. Pull back so your whole foot \u2014 toes to heel "
-            "\u2014 is fully inside the frame, then retake."
-        )
+        return contour, "heel-not-visible"
     # Heel is complete; the ankle/leg runs out of frame. Truncate the leg
     # so it cannot pollute the length measurement.
     trunc = _truncate_at_ankle(contour, major, t, widths, tmin, tmax,
@@ -1067,6 +1066,7 @@ def process_scan(image_bytes: bytes, foot_side: str = "left", reference: str = "
 
     # 3. Segment (neural primary, classical last resort).
     contour, seg_method = segment_foot(work)
+    heel_visible = "heel-not-visible" not in seg_method
     gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
 
     # Foot mask (for reference overlap checks), in working resolution.
@@ -1121,11 +1121,11 @@ def process_scan(image_bytes: bytes, foot_side: str = "left", reference: str = "
         heel_mm = lm["heel_px"] * inv / px_per_mm
         arch_mm = lm["arch_px"] * inv / px_per_mm
         measurements = {
-            "length_mm": round(length_mm, 1),
+            "length_mm": round(length_mm, 1) if heel_visible else None,
             "ball_width_mm": round(ball_mm, 1),
-            "heel_width_mm": round(heel_mm, 1),
+            "heel_width_mm": round(heel_mm, 1) if heel_visible else None,
             "arch_width_mm": round(arch_mm, 1),
-            "length_in": round(length_mm / MM_PER_INCH, 2),
+            "length_in": round(length_mm / MM_PER_INCH, 2) if heel_visible else None,
             "calibrated": True,
             "reference": reference,
             "px_per_mm": round(px_per_mm, 4),
@@ -1143,6 +1143,11 @@ def process_scan(image_bytes: bytes, foot_side: str = "left", reference: str = "
         }
 
     warnings = [ESTIMATED_WARNING]
+    if not heel_visible:
+        warnings.append(
+            "PARTIAL \u2014 heel not visible in photo; widths measured, "
+            "length unavailable. Place foot flat with heel fully in frame "
+            "for complete measurements.")
     if not calibrated:
         if reference == "none":
             warnings.append("UNSCALED \u2014 no reference used; shape only, no dimensions.")
