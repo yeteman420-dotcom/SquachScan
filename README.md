@@ -1,12 +1,25 @@
-# ModToes Foot Scanner v2 — Backend
+# ModToes Foot Scanner v3 — Backend
 
 A privacy-first Flask backend that turns a top-down foot photo into a CAD
 technical drawing (SVG + PNG) with estimated length/width measurements.
 
-**What it is:** `app.py` (Flask API) + `pipeline.py` (OpenCV measurement
+**What it is:** `app.py` (Flask API) + `pipeline.py` (neural measurement
 pipeline) + `cad.py` (CAD renderer, SVG + Pillow PNG). No photo is ever
 stored — processing happens entirely in memory and the image is gone the
 moment the drawing is made.
+
+**v3 segmentation engine:** U²-Net (`u2netp`, 4.7 MB) salient-object
+segmentation via ONNX Runtime (CPU-only). The model runs at 320×320, the
+mask is upscaled and morphologically refined, and the largest connected
+component becomes the foot contour. This replaces v2's Otsu/GrabCut
+thresholding, which failed on carpet and textured backgrounds. The
+classical pipeline is kept as a last-resort fallback if the model is
+unavailable. Model weights download at build time
+(`scripts/fetch_model.py`) and are never committed to git. BiRefNet was
+evaluated and rejected: its 109–930 MB weights cannot load in the Render
+free tier's 512 MB RAM. Synthetic QA: IoU 0.97–0.99 on carpet textures,
+calibration error under 5%, full scan ~0.5–1.5s on CPU. No real-foot
+testing yet — see DEPLOY_NOTES.md.
 
 ## API
 
@@ -52,7 +65,7 @@ never guesses a scale.
 
 Errors are always `{"ok": false, "error": "plain message", "code": "…"}`.
 
-### GET /healthz → `{"ok": true, "version": "2.0.0"}`
+### GET /healthz → `{"ok": true, "version": "3.0.0"}`
 ### GET / → scanner UI · GET /privacy, /terms → policy pages
 
 ## How it works
@@ -60,14 +73,19 @@ Errors are always `{"ok": false, "error": "plain message", "code": "…"}`.
 1. **EXIF strip** (`pipeline.strip_exif`): Pillow re-encodes the upload to
    RGB JPEG with zero metadata; verified — no EXIF survives.
 2. **Decode + downscale** to max 1200 px (scale factor tracked).
-3. **Segmentation**: grayscale → blur → Otsu (both polarities) → close →
-   largest contour passing sanity checks (area 5–60% of image, minAreaRect
-   aspect 1.8–4.2, not touching the frame). GrabCut fallback. Raises
+3. **Segmentation**: U²-Net neural saliency mask → upscale → morphological
+   refine → largest connected component → foot contour (sanity-checked:
+   area 5–60% of image, minAreaRect aspect 1.8–4.2, not touching the frame).
+   Last-resort fallbacks: Otsu (both polarities), then GrabCut. Raises
    `NoFootFound` otherwise.
-4. **Reference detection**: quarter via HoughCircles (diameter must be
-   6–16% of foot length; `px_per_mm = d_px / 24.26`); credit card via
-   `approxPolyDP` quadrilaterals with aspect 1.586 ± 0.12
-   (`px_per_mm = long_side_px / 85.60`).
+4. **Reference detection**: quarter via HoughCircles with edge-support
+   verification + hill-climbing refinement + contour-circularity fallback
+   (diameter must be 6–16% of foot length; `px_per_mm = d_px / 24.26`);
+   credit card via `approxPolyDP` quadrilaterals on convex hulls with aspect
+   1.586 ± 0.12, rectangularity checks, foot-overlap rejection, plus a
+   uniformity-based fallback for patterned rugs
+   (`px_per_mm = long_side_px / 85.60`). Absurd detections are rejected,
+   never calibrated from.
 5. **Landmarks**: PCA long axis; length = max heel→toe extent; widths along
    the minor axis at stations (ball = max width in forefoot third, heel =
    width at rear 12–18%, arch = min width in middle third). Heel/toe
@@ -77,6 +95,13 @@ Errors are always `{"ok": false, "error": "plain message", "code": "…"}`.
    arrowheads (calibrated only), title block, and the red
    `ESTIMATED — VERIFY WITH PHYSICAL MEASUREMENT. Not medical advice.` footer.
    `to_svg()` → standalone SVG; `to_png()` → ~150 DPI PNG via Pillow only.
+
+## Model weights
+
+`models/u2netp.onnx` (4.4 MB) is **not** in git. It downloads at build time:
+`python scripts/fetch_model.py` verifies size + SHA-256 and fails loudly on
+a bad download. Render runs it via `buildCommand` (see `render.yaml`).
+For local dev, run the script once manually.
 
 ## Security & privacy architecture
 
@@ -131,9 +156,11 @@ Errors are always `{"ok": false, "error": "plain message", "code": "…"}`.
 
 ## Files
 - `app.py` — routes, security headers, rate limiting, consent log, errors
-- `pipeline.py` — OpenCV pipeline (EXIF strip → segment → reference → landmarks)
+- `pipeline.py` — neural pipeline (EXIF strip → U²-Net segment → reference → landmarks)
 - `cad.py` — CAD renderer (SVG string + PNG bytes, Pillow only)
+- `models/` — U²-Net weights (downloaded at build, gitignored, never committed)
+- `scripts/fetch_model.py` — verified weights downloader (build + local dev)
 - `templates/` — UI + privacy/terms pages (frontend owned by sibling)
 - `static/` — frontend assets (sibling)
 - `consent_log/` — append-only consent records (only persistent state)
-- `render.yaml`, `requirements.txt`
+- `render.yaml`, `requirements.txt`, `DEPLOY_NOTES.md`
