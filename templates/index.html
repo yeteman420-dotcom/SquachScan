@@ -191,4 +191,16 @@
       <h2 id="consent-title">Consent: foot-photo processing</h2>
       <p>This scanner processes a photo of your foot (<strong>biometric data</strong>) to measure it.</p>
       <p>Your photo is processed in memory and <strong>permanently deleted immediately</strong> after your CAD drawing is generated. We keep only a timestamped record that you consented &mdash; no photo, no name.</p>
-      <label class="consent
+      <label class="consent-box">
+        <input type="checkbox" id="consent-checkbox">
+        <span>I understand and consent to foot-photo processing for measurement.</span>
+      </label>
+      <p class="small mono-line" id="consent-timestamp"></p>
+      <button class="btn btn-primary" id="btn-consent" disabled>I consent</button>
+      <button class="btn btn-ghost" id="btn-decline">Decline</button>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
