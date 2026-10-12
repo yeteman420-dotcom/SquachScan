@@ -51,7 +51,7 @@ CONSENT_DIR = os.path.join(BASE_DIR, "consent_log")
 CONSENT_FILE = os.path.join(CONSENT_DIR, "consent.jsonl")
 os.makedirs(CONSENT_DIR, exist_ok=True)
 
-VERSION = "3.6.0"
+VERSION = "3.6.1"
 MAX_CONTENT_LENGTH = 8 * 1024 * 1024          # 8 MB photo cap
 RATE_LIMIT_N = 10                             # scans ...
 RATE_LIMIT_WINDOW = 3600                      # ... per hour, per IP
@@ -194,8 +194,72 @@ def view_3d():
 
 @app.get("/api/3d-model")
 def get_3d_model():
+    return _serve_3d_model()
+
+
+# --- Parametric foot generator (numpy-only, no heavy deps) ---
+# Reference profile extracted from the accepted model (230.9 x 90.7 x 67.8 mm,
+# watertight). 40 stations heel->toe, superellipse (e=2.5) cross-sections.
+_FOOT_HALF_W = [
+    30.0, 31.1, 31.7, 32.0, 32.0, 31.7, 31.2, 30.6, 29.8, 29.1,
+    28.4, 28.0, 28.1, 28.6, 29.6, 31.0, 32.7, 34.8, 36.9, 39.0,
+    40.9, 42.5, 43.8, 44.7, 45.3, 45.4, 45.0, 44.3, 43.2, 41.7,
+    40.0, 38.3, 36.7, 35.0, 32.9, 30.3, 26.9, 22.3, 16.1,  8.0,
+]
+_FOOT_HEIGHTS = [
+    64.5, 66.4, 67.5, 67.8, 67.4, 66.3, 64.5, 62.0, 58.8, 55.1,
+    51.1, 47.1, 43.5, 40.3, 37.7, 35.6, 33.9, 32.6, 31.9, 31.5,
+    31.6, 32.1, 32.9, 34.0, 35.3, 36.5, 37.4, 37.6, 36.9, 35.5,
+    33.7, 31.8, 30.3, 28.8, 27.1, 24.8, 21.6, 17.7, 13.6, 11.5,
+]
+_FOOT_REF_LEN, _FOOT_REF_WID = 230.9, 90.7
+
+
+def _build_parametric_foot(length_mm, width_mm=None):
+    """Return (verts, faces) for a parametric foot scaled to length_mm
+    (and width_mm when given). numpy only. Watertight."""
+    import numpy as np
+    n_st, n_ar, exp = 40, 32, 2.5
+    verts = []
+    for i in range(n_st):
+        x = i / (n_st - 1) * _FOOT_REF_LEN
+        w, h = _FOOT_HALF_W[i], _FOOT_HEIGHTS[i]
+        for j in range(n_ar):
+            ang = 2 * np.pi * j / n_ar
+            cx = np.sign(np.cos(ang)) * abs(np.cos(ang)) ** (2 / exp) * w
+            s = np.sin(ang)
+            cz = 2 + s * 2 if s < 0 else 2 + s * (h - 2)
+            verts.append([x, cx, max(cz, 0.0)])
+    verts = np.array(verts)
+    faces = []
+    for i in range(n_st - 1):
+        for j in range(n_ar):
+            j2 = (j + 1) % n_ar
+            a, b = i * n_ar + j, i * n_ar + j2
+            c, d = (i + 1) * n_ar + j, (i + 1) * n_ar + j2
+            faces.append([a, c, b])
+            faces.append([b, c, d])
+    hc = len(verts)
+    verts = np.vstack([verts, [[0.0, 0.0, _FOOT_HEIGHTS[0] / 2]]])
+    for j in range(n_ar):
+        faces.append([hc, (j + 1) % n_ar, j])
+    tc = len(verts)
+    verts = np.vstack([verts, [[_FOOT_REF_LEN, 0.0, _FOOT_HEIGHTS[-1] / 2]]])
+    base = (n_st - 1) * n_ar
+    for j in range(n_ar):
+        faces.append([tc, base + j, base + (j + 1) % n_ar])
+    sx = length_mm / _FOOT_REF_LEN
+    sy = (width_mm / _FOOT_REF_WID) if (width_mm and width_mm > 0) else sx
+    sz = sx
+    verts[:, 0] *= sx
+    verts[:, 1] *= sy
+    verts[:, 2] *= sz
+    return verts, np.array(faces, dtype=np.int32)
+
+
+def _serve_3d_model():
     # Serve a 3D foot model scaled to the user's foot length.
-    # ?length_mm=230.9 scales the parametric model. Defaults to demo.
+    # ?length_mm=230.9&width_mm=95 scales the parametric model. Defaults to demo.
     # Procedural generation: no file deps, no heavy libs, just numpy.
     from flask import send_file
     import os, io, struct
@@ -208,48 +272,7 @@ def get_3d_model():
         return send_file(model_path, mimetype="model/obj",
                          as_attachment=True, download_name="foot-3d.obj")
     try:
-        # Procedural parametric foot (matches the 230.9mm reference model)
-        # Stations: heel(0) to toes(1)
-        stations = np.array([0.00, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.85])
-        half_w = np.array([30, 32, 30, 28, 32, 40, 45, 44, 40, 38])
-        heights = np.array([65, 68, 60, 45, 35, 32, 35, 38, 35, 30])
-        n_st, n_ar = 32, 28
-        t = np.linspace(0, 0.85, n_st)
-        # Linear interp (avoid scipy dep)
-        def interp(x, xp, fp):
-            return np.interp(x, xp, fp)
-        verts = []
-        for ti in t:
-            x = ti * 230.9
-            w = float(interp(ti, stations, half_w))
-            h = float(interp(ti, stations, heights))
-            for j in range(n_ar):
-                ang = 2*np.pi*j/n_ar
-                e = 2.5
-                cx = np.sign(np.cos(ang)) * abs(np.cos(ang))**(2/e) * w
-                sy = np.sin(ang)
-                cz = 2 + sy*2 if sy < 0 else 2 + sy*(h-2)
-                verts.append([x, cx, max(cz, 0.5)])
-        verts = np.array(verts)
-        faces = []
-        for i in range(n_st-1):
-            for j in range(n_ar):
-                j2 = (j+1) % n_ar
-                a, b = i*n_ar+j, i*n_ar+j2
-                c, d = (i+1)*n_ar+j, (i+1)*n_ar+j2
-                faces.append([a,c,b]); faces.append([b,c,d])
-        hc = len(verts); verts = np.vstack([verts, [[0,0,35]]])
-        for j in range(n_ar):
-            faces.append([hc, (j+1)%n_ar, j])
-        # Scale to requested length (X) and width (Y, ball width 90.7mm ref)
-        # Height (Z) scales with length proportionally
-        sx = length_mm / 230.9
-        sy = (width_mm / 90.7) if width_mm and width_mm > 0 else sx
-        sz = sx  # height follows length
-        verts[:, 0] *= sx
-        verts[:, 1] *= sy
-        verts[:, 2] *= sz
-        faces = np.array(faces, dtype=np.int32)
+        verts, faces = _build_parametric_foot(length_mm, width_mm)
         if fmt == "stl":
             buf = io.BytesIO()
             buf.write(b'\x00'*80)
